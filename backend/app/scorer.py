@@ -9,8 +9,8 @@ import joblib
 import json
 from pathlib import Path
 from typing import Dict, Optional
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import precision_recall_curve, roc_auc_score, precision_score, recall_score
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import precision_recall_curve, roc_auc_score
 import xgboost as xgb
 
 
@@ -46,7 +46,9 @@ class RiskModel:
         self.feature_columns = list(X_train.columns)
 
         if scale_pos_weight is None:
-            scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+            positive_count = int((y_train == 1).sum())
+            negative_count = int((y_train == 0).sum())
+            scale_pos_weight = negative_count / positive_count if positive_count else 1.0
 
         print(f"  Training XGBoost (scale_pos_weight={scale_pos_weight:.2f})...")
 
@@ -69,23 +71,23 @@ class RiskModel:
             verbose=False,
         )
 
-        print(f"    → Best iteration: {self.model.best_iteration}")
-        print(f"    → Best score: {self.model.best_score:.4f}")
+        print(f"    -> Best iteration: {self.model.best_iteration}")
+        print(f"    -> Best score: {self.model.best_score:.4f}")
 
-        # Calibrate probabilities (isotonic)
+        # Calibrate probabilities using a held-out validation set.
         print("  Calibrating probabilities...")
-        self.calibrator = CalibratedClassifierCV(
-            self.model,
-            method='isotonic',
-            cv='prefit',
-        )
-        self.calibrator.fit(X_val, y_val)
+        self.calibrator = IsotonicRegression(out_of_bounds='clip')
+        validation_proba = self.model.predict_proba(X_val)[:, 1]
+        self.calibrator.fit(validation_proba, y_val)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Get calibrated probabilities."""
+        if self.model is None or self.calibrator is None:
+            raise RuntimeError('RiskModel must be trained or loaded before prediction')
         if self.feature_columns is not None:
             X = X[self.feature_columns]
-        return self.calibrator.predict_proba(X)[:, 1]
+        raw_proba = self.model.predict_proba(X)[:, 1]
+        return np.asarray(self.calibrator.predict(raw_proba), dtype=float)
 
     def predict_score(self, X: pd.DataFrame) -> np.ndarray:
         """Get risk scores (0-100)."""
@@ -106,7 +108,7 @@ class RiskModel:
         with open(model_dir / 'model_version.txt', 'w') as f:
             f.write(self.version)
 
-        print(f"✓ Model saved to {model_dir}/")
+        print(f"Model saved to {model_dir}/")
 
     @classmethod
     def load(cls, model_dir: str = 'models') -> 'RiskModel':
@@ -245,7 +247,7 @@ def evaluate_model(
 
     # F1 score
     from sklearn.metrics import f1_score
-    f1 = f1_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
 
     metrics = {
         'name': name,

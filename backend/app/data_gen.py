@@ -50,6 +50,8 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
     rng = np.random.default_rng(seed)
     fake = Faker('en_IN')
     Faker.seed(seed)
+    # Use a fixed reference time so the same seed produces identical data.
+    reference_time = datetime(2026, 1, 1)
 
     print(f"Generating synthetic dataset with seed={seed}...")
 
@@ -70,7 +72,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                 'kyc_level': rng.choice(['basic', 'full'], p=[0.3, 0.7]),
                 'persona': persona,
                 'status': 'clear',
-                'created_at': datetime.now() - timedelta(days=int(age_days)),
+                'created_at': reference_time - timedelta(days=int(age_days)),
             })
             account_id += 1
 
@@ -80,7 +82,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
 
     for archetype, config in FRAUD_ARCHETYPES.items():
         for _ in range(config['count']):
-            size = rng.integers(*config['size_range'])
+            size = int(rng.integers(*config['size_range']))
             for _ in range(size):
                 age_days = rng.integers(1, 15) if archetype == 'burst_mule' else rng.integers(5, 180)
                 fraud_accounts.append({
@@ -93,7 +95,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                     'ring_id': f'R_{ring_id:03d}',
                     'archetype': archetype,
                     'status': 'clear',
-                    'created_at': datetime.now() - timedelta(days=int(age_days)),
+                    'created_at': reference_time - timedelta(days=int(age_days)),
                 })
                 account_id += 1
             ring_id += 1
@@ -153,7 +155,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
         archetype = group.iloc[0]['archetype']
         if archetype == 'device_farm':
             # 1-2 devices for the whole ring
-            num_devices = rng.integers(1, 3)
+            num_devices = int(rng.integers(1, 3))
             for _ in range(num_devices):
                 device_fingerprint = fake.sha256()[:16]
                 devices_list.append({
@@ -192,7 +194,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
     transactions_list = []
     txn_id = 1
 
-    start_time = datetime.now() - timedelta(days=SIMULATION_DAYS)
+    start_time = reference_time - timedelta(days=SIMULATION_DAYS)
 
     # Normal transactions
     for idx, row in accounts_df[accounts_df['persona'] != 'fraud'].iterrows():
@@ -200,7 +202,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
         acc_id = row['account_id']
 
         if persona == 'salaried':
-            num_txns = rng.integers(15, 40)
+            num_txns = int(rng.integers(15, 40))
             # Salary credit
             salary_day = int(rng.choice([1, 28]))
             salary_date = start_time + timedelta(days=salary_day)
@@ -221,8 +223,8 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             for _ in range(num_txns - 1):
                 hour = int(rng.normal(14, 4) % 24)
                 if hour < 9 or hour > 21:
-                    hour = rng.integers(9, 21)
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=int(rng.integers(0, 60)))
+                    hour = int(rng.integers(9, 21))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS)), hours=hour, minutes=int(rng.integers(0, 60)))
 
                 transactions_list.append({
                     'txn_id': f'TXN_{txn_id:08d}',
@@ -236,12 +238,12 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                 txn_id += 1
 
         elif persona == 'merchant':
-            num_txns = rng.integers(100, 250)
+            num_txns = int(rng.integers(100, 250))
             device = account_devices_df[account_devices_df['account_id'] == acc_id]['device_id'].values[0]
 
             for _ in range(num_txns):
-                hour = rng.integers(8, 22)
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=int(rng.integers(0, 60)))
+                hour = int(rng.integers(8, 22))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS)), hours=hour, minutes=int(rng.integers(0, 60)))
 
                 # Mostly credits (customer payments)
                 if rng.random() < 0.85:
@@ -268,12 +270,12 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                 txn_id += 1
 
         elif persona == 'student':
-            num_txns = rng.integers(5, 20)
+            num_txns = int(rng.integers(5, 20))
             device = account_devices_df[account_devices_df['account_id'] == acc_id]['device_id'].values[0]
 
             for _ in range(num_txns):
-                hour = rng.integers(10, 22)
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=int(rng.integers(0, 60)))
+                hour = int(rng.integers(10, 22))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS)), hours=hour, minutes=int(rng.integers(0, 60)))
 
                 transactions_list.append({
                     'txn_id': f'TXN_{txn_id:08d}',
@@ -287,12 +289,12 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                 txn_id += 1
 
         elif persona == 'dormant':
-            num_txns = rng.integers(0, 5)
+            num_txns = int(rng.integers(0, 5))
             if num_txns > 0:
                 device = account_devices_df[account_devices_df['account_id'] == acc_id]['device_id'].values[0]
 
                 for _ in range(num_txns):
-                    txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=int(rng.integers(9, 20)))
+                    txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS)), hours=int(rng.integers(9, 20)))
 
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
@@ -306,13 +308,13 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                     txn_id += 1
 
         elif persona == 'family':
-            num_txns = rng.integers(10, 30)
+            num_txns = int(rng.integers(10, 30))
             device = account_devices_df[account_devices_df['account_id'] == acc_id]['device_id'].values[0]
             # Find family group members
             family_members = account_devices_df[account_devices_df['device_id'] == device]['account_id'].values
 
             for _ in range(num_txns):
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=int(rng.integers(9, 21)))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS)), hours=int(rng.integers(9, 21)))
 
                 # 60% within family, 40% outside
                 if rng.random() < 0.6 and len(family_members) > 1:
@@ -327,10 +329,12 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                         'timestamp': txn_date,
                     })
                 else:
+                    sender = acc_id if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}'
+                    receiver = f'ACC_{rng.integers(1, len(accounts_df)):05d}' if sender == acc_id else acc_id
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
-                        'sender_account_id': acc_id if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}',
-                        'receiver_account_id': f'ACC_{rng.integers(1, len(accounts_df)):05d}' if acc_id == transactions_list[-1]['sender_account_id'] else acc_id,
+                        'sender_account_id': sender,
+                        'receiver_account_id': receiver,
                         'amount': round(rng.lognormal(6.5, 1)),
                         'channel': 'UPI',
                         'device_id': device,
@@ -353,7 +357,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             # 1 source receives large amount, disperses to all members
             source = members[0]
             hour = rng.integers(0, 24)
-            base_time = start_time + timedelta(days=fraud_day, hours=hour)
+            base_time = start_time + timedelta(days=int(fraud_day), hours=int(hour))
             device = account_devices_df[account_devices_df['account_id'] == source]['device_id'].values[0]
 
             # Large inflow
@@ -389,7 +393,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             collectors = members[:2]
             mules = members[2:]
             hour = rng.integers(0, 24)
-            base_time = start_time + timedelta(days=fraud_day, hours=hour)
+            base_time = start_time + timedelta(days=int(fraud_day), hours=int(hour))
 
             for mule in mules:
                 device = account_devices_df[account_devices_df['account_id'] == mule]['device_id'].values[0]
@@ -402,7 +406,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                     'amount': rng.integers(5000, 20000),
                     'channel': 'UPI',
                     'device_id': device,
-                    'timestamp': base_time + timedelta(minutes=rng.integers(-30, 30)),
+                    'timestamp': base_time + timedelta(minutes=int(rng.integers(-30, 30))),
                 })
                 txn_id += 1
 
@@ -422,7 +426,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
         elif archetype == 'circular_layering':
             # A->B->C->D->A cycles
             hour = rng.integers(0, 24)
-            base_time = start_time + timedelta(days=fraud_day, hours=hour)
+            base_time = start_time + timedelta(days=int(fraud_day), hours=int(hour))
 
             for i in range(len(members)):
                 sender = members[i]
@@ -436,7 +440,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                     'amount': rng.integers(10000, 50000),
                     'channel': 'IMPS',
                     'device_id': device,
-                    'timestamp': base_time + timedelta(minutes=i * rng.integers(15, 60)),
+                    'timestamp': base_time + timedelta(minutes=int(i * rng.integers(15, 60))),
                 })
                 txn_id += 1
 
@@ -444,16 +448,18 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             # High volume, amounts just below ₹10k threshold
             for member in members:
                 device = account_devices_df[account_devices_df['account_id'] == member]['device_id'].values[0]
-                num_burst = rng.integers(20, 50)
-                burst_start = start_time + timedelta(days=fraud_day, hours=int(rng.integers(22, 24)))
+                num_burst = int(rng.integers(20, 50))
+                burst_start = start_time + timedelta(days=int(fraud_day), hours=int(rng.integers(22, 24)))
 
                 for j in range(num_burst):
-                    txn_time = burst_start + timedelta(minutes=j * rng.integers(2, 8))
+                    txn_time = burst_start + timedelta(minutes=int(j * rng.integers(2, 8)))
 
+                    sender = member if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}'
+                    receiver = f'ACC_{rng.integers(1, len(accounts_df)):05d}' if sender == member else member
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
-                        'sender_account_id': member if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}',
-                        'receiver_account_id': f'ACC_{rng.integers(1, len(accounts_df)):05d}' if transactions_list[-1]['sender_account_id'] == member else member,
+                        'sender_account_id': sender,
+                        'receiver_account_id': receiver,
                         'amount': rng.integers(9000, 9999),
                         'channel': 'UPI',
                         'device_id': device,
@@ -464,17 +470,19 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
         elif archetype == 'device_farm':
             # High velocity on shared device
             device = account_devices_df[account_devices_df['account_id'] == members[0]]['device_id'].values[0]
-            num_txns_per_member = rng.integers(15, 30)
+            num_txns_per_member = int(rng.integers(15, 30))
 
             for member in members:
                 for _ in range(num_txns_per_member):
                     hour = rng.integers(0, 24)
-                    txn_date = start_time + timedelta(days=int(rng.integers(fraud_day - 1, fraud_day + 2), hours=hour, minutes=int(rng.integers(0, 60)))
+                    txn_date = start_time + timedelta(days=int(rng.integers(int(fraud_day) - 1, int(fraud_day) + 2)), hours=int(hour), minutes=int(rng.integers(0, 60)))
 
+                    sender = member if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}'
+                    receiver = f'ACC_{rng.integers(1, len(accounts_df)):05d}' if txn_id % 2 == 0 else member
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
-                        'sender_account_id': member if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}',
-                        'receiver_account_id': f'ACC_{rng.integers(1, len(accounts_df)):05d}' if txn_id % 2 == 0 else member,
+                        'sender_account_id': sender,
+                        'receiver_account_id': receiver,
                         'amount': rng.integers(1000, 15000),
                         'channel': 'UPI',
                         'device_id': device,
@@ -482,7 +490,14 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                     })
                     txn_id += 1
 
-    transactions_df = pd.DataFrame(transactions_list).sort_values('timestamp').reset_index(drop=True)
+    transactions_df = pd.DataFrame(transactions_list)
+    if transactions_df.empty:
+        transactions_df = pd.DataFrame(columns=[
+            'txn_id', 'sender_account_id', 'receiver_account_id',
+            'amount', 'channel', 'device_id', 'timestamp'
+        ])
+    else:
+        transactions_df = transactions_df.sort_values('timestamp').reset_index(drop=True)
 
     # Limit to target count
     if len(transactions_df) > TOTAL_TRANSACTIONS:

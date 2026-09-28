@@ -113,7 +113,10 @@ def build_features(
                     'median_dwell_minutes': np.median(dwells)
                 })
 
-    median_dwell = pd.DataFrame(dwell_list).set_index('account_id')['median_dwell_minutes']
+    if dwell_list:
+        median_dwell = pd.DataFrame(dwell_list).set_index('account_id')['median_dwell_minutes']
+    else:
+        median_dwell = pd.Series(dtype=float, name='median_dwell_minutes')
 
     # Max transactions in any 10-minute window
     tx['timestamp_10min'] = tx['timestamp'].dt.floor('10min')
@@ -153,13 +156,11 @@ def build_features(
         return new_count / len(group) if len(group) > 0 else 0
 
     new_cp_in = tx.groupby('receiver_account_id').apply(
-        lambda g: new_counterparty_ratio_calc(g, 'receiver_account_id', 'sender_account_id'),
-        include_groups=False
+        lambda g: new_counterparty_ratio_calc(g, 'receiver_account_id', 'sender_account_id')
     ).rename('new_counterparty_ratio_in')
 
     new_cp_out = tx.groupby('sender_account_id').apply(
-        lambda g: new_counterparty_ratio_calc(g, 'sender_account_id', 'receiver_account_id'),
-        include_groups=False
+        lambda g: new_counterparty_ratio_calc(g, 'sender_account_id', 'receiver_account_id')
     ).rename('new_counterparty_ratio_out')
 
     new_cp_ratio = pd.DataFrame({

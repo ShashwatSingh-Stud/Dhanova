@@ -69,6 +69,8 @@ def detect_communities(G: nx.DiGraph, seed: int = 42) -> List[set]:
     """
     # Convert to undirected for community detection
     G_undirected = G.to_undirected()
+    if G_undirected.number_of_nodes() == 0:
+        return []
 
     # Louvain community detection (built into networkx 3.2+)
     communities = nx.community.louvain_communities(
@@ -244,6 +246,12 @@ def graph_features(
         DataFrame indexed by account_id with graph features
     """
     all_nodes = list(G.nodes())
+    if not all_nodes:
+        return pd.DataFrame(columns=[
+            'in_degree', 'out_degree', 'pagerank', 'clustering_coef',
+            'community_size', 'community_internal_flow_ratio',
+            'community_density', 'in_short_cycle'
+        ], index=pd.Index([], name='account_id'))
 
     # Degree
     in_degrees = dict(G.in_degree())
@@ -336,7 +344,7 @@ def evaluate_rings(
     """
     Evaluate ring detection performance.
 
-    A detected ring is "correct" if ≥70% of its members are from the same
+    A detected ring is "correct" if at least 70% of its members are from the same
     ground-truth fraud ring.
 
     Args:

@@ -5,12 +5,14 @@ Trains XGBoost with group split, evaluates baselines, generates reports.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / 'backend'))
 
 import pandas as pd
 import numpy as np
 import json
-from pathlib import Path
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import classification_report
@@ -35,11 +37,11 @@ def load_data():
     print("Loading data...")
 
     data = {
-        'accounts': pd.read_parquet('data/accounts.parquet'),
-        'devices': pd.read_parquet('data/devices.parquet'),
-        'account_devices': pd.read_parquet('data/account_devices.parquet'),
-        'transactions': pd.read_parquet('data/transactions.parquet'),
-        'labels': pd.read_parquet('data/labels.parquet'),
+        'accounts': pd.read_parquet(PROJECT_ROOT / 'data/accounts.parquet'),
+        'devices': pd.read_parquet(PROJECT_ROOT / 'data/devices.parquet'),
+        'account_devices': pd.read_parquet(PROJECT_ROOT / 'data/account_devices.parquet'),
+        'transactions': pd.read_parquet(PROJECT_ROOT / 'data/transactions.parquet'),
+        'labels': pd.read_parquet(PROJECT_ROOT / 'data/labels.parquet'),
     }
 
     print(f"  Loaded {len(data['accounts'])} accounts, {len(data['transactions'])} transactions")
@@ -101,7 +103,7 @@ def build_all_features(data):
 
     features = features[FEATURE_COLUMNS]
 
-    print(f"  ✓ Features shape: {features.shape}")
+    print(f"  Features shape: {features.shape}")
 
     return features, rings, ring_eval
 
@@ -205,13 +207,19 @@ def train_baselines(X_train, X_test, y_train, y_test):
 
     # Simple train without validation split for ablation
     from sklearn.model_selection import train_test_split
-    X_tr, X_vl, y_tr, y_vl = train_test_split(X_train_no_graph, y_train, test_size=0.2, random_state=42)
+    X_tr, X_vl, y_tr, y_vl = train_test_split(
+        X_train_no_graph,
+        y_train,
+        test_size=0.2,
+        random_state=42,
+        stratify=y_train if y_train.nunique() > 1 else None,
+    )
 
     model_no_graph.train(X_tr, y_tr, None, X_vl, y_vl)
 
     baselines['xgboost_no_graph'] = evaluate_model(model_no_graph, X_test_no_graph, y_test, name="XGBoost (no graph)")
 
-    print("  ✓ Baselines trained")
+    print("  Baselines trained")
 
     return baselines
 
@@ -236,7 +244,7 @@ def train_final_model(X_train, X_val, X_test, y_train, y_val, y_test):
     print(f"    F1 Score: {metrics['f1_score']:.4f}")
 
     # Save model
-    model.save('models')
+    model.save(str(PROJECT_ROOT / 'models'))
 
     return model, metrics
 
@@ -245,7 +253,8 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
     """Generate evaluation reports and plots."""
     print("\nGenerating reports...")
 
-    Path('reports').mkdir(exist_ok=True)
+    reports_dir = PROJECT_ROOT / 'reports'
+    reports_dir.mkdir(exist_ok=True)
 
     # Metrics JSON
     metrics_report = {
@@ -256,10 +265,10 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
         'test_fraud_count': int(y_test.sum()),
     }
 
-    with open('reports/metrics.json', 'w') as f:
+    with open(reports_dir / 'metrics.json', 'w') as f:
         json.dump(metrics_report, f, indent=2)
 
-    print("  ✓ Saved reports/metrics.json")
+    print("  Saved reports/metrics.json")
 
     # Plots
     print("  -> Generating plots...")
@@ -278,10 +287,10 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
     plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig('reports/pr_curve.png', dpi=150)
+    plt.savefig(reports_dir / 'pr_curve.png', dpi=150)
     plt.close()
 
-    print("  ✓ Saved reports/pr_curve.png")
+    print("  Saved reports/pr_curve.png")
 
     # 2. SHAP summary plot
     print("  -> Computing SHAP values (this may take a minute)...")
@@ -299,10 +308,10 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
     plt.figure(figsize=(10, 8))
     shap.summary_plot(shap_values, X_sample, show=False, max_display=15)
     plt.tight_layout()
-    plt.savefig('reports/shap_summary.png', dpi=150, bbox_inches='tight')
+    plt.savefig(reports_dir / 'shap_summary.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-    print("  ✓ Saved reports/shap_summary.png")
+    print("  Saved reports/shap_summary.png")
 
     # 3. Feature importance
     import xgboost as xgb
@@ -311,12 +320,12 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
     xgb.plot_importance(model.model, max_num_features=15, importance_type='gain')
     plt.title('Feature Importance (Gain)')
     plt.tight_layout()
-    plt.savefig('reports/feature_importance.png', dpi=150)
+    plt.savefig(reports_dir / 'feature_importance.png', dpi=150)
     plt.close()
 
-    print("  ✓ Saved reports/feature_importance.png")
+    print("  Saved reports/feature_importance.png")
 
-    print("\n✓ All reports generated in reports/")
+    print("\nAll reports generated in reports/")
 
 
 def main():
@@ -354,7 +363,7 @@ def main():
             print(f"  {expl['explanation']}")
 
     print("\n" + "=" * 60)
-    print("✓ Training complete!")
+    print("Training complete!")
     print("=" * 60)
     print("\nNext steps:")
     print("  1. Review metrics in reports/metrics.json")

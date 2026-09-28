@@ -34,7 +34,7 @@ FEATURE_DESCRIPTIONS = {
     'community_size': 'belongs to a network community of {value} accounts',
     'community_internal_flow_ratio': '{pct}% of community\'s money stays internal',
     'community_density': 'community has dense connections (density={value:.3f})',
-    'in_short_cycle': 'participates in circular money flow (A→B→C→A pattern)',
+    'in_short_cycle': 'participates in circular money flow (A->B->C->A pattern)',
 }
 
 
@@ -68,7 +68,10 @@ def explain(
     account_features = features.loc[[account_id]]
 
     # Get prediction
-    score = int(model.predict_proba(account_features)[:, 1][0] * 100)
+    raw_prediction = model.predict_proba(account_features)
+    if raw_prediction.ndim == 2:
+        raw_prediction = raw_prediction[:, 1]
+    score = int(float(raw_prediction[0]) * 100)
 
     # SHAP explanation
     explainer = shap.TreeExplainer(model)
@@ -76,6 +79,8 @@ def explain(
 
     # Get base value (average prediction)
     base_value = explainer.expected_value
+    if isinstance(base_value, np.ndarray):
+        base_value = base_value[-1] if base_value.ndim else base_value.item()
 
     if isinstance(shap_values, list):
         shap_values = shap_values[1]  # For binary classification, take positive class
