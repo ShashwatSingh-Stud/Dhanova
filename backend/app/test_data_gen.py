@@ -5,7 +5,12 @@ Tests for Dhanova data generation.
 import pytest
 import pandas as pd
 import numpy as np
-from backend.app.data_gen import generate
+
+try:
+    from backend.app.data_gen import generate
+except ModuleNotFoundError:
+    # Supports running pytest from the repository root and from backend/app.
+    from data_gen import generate
 
 
 def test_generate_reproducibility():
