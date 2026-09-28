@@ -222,7 +222,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                 hour = int(rng.normal(14, 4) % 24)
                 if hour < 9 or hour > 21:
                     hour = rng.integers(9, 21)
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=int(rng.integers(0, 60)))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=rng.integers(0, 60))
 
                 transactions_list.append({
                     'txn_id': f'TXN_{txn_id:08d}',
@@ -241,7 +241,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
 
             for _ in range(num_txns):
                 hour = rng.integers(8, 22)
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=int(rng.integers(0, 60)))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=rng.integers(0, 60))
 
                 # Mostly credits (customer payments)
                 if rng.random() < 0.85:
@@ -273,7 +273,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
 
             for _ in range(num_txns):
                 hour = rng.integers(10, 22)
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=int(rng.integers(0, 60)))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=hour, minutes=rng.integers(0, 60))
 
                 transactions_list.append({
                     'txn_id': f'TXN_{txn_id:08d}',
@@ -292,7 +292,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                 device = account_devices_df[account_devices_df['account_id'] == acc_id]['device_id'].values[0]
 
                 for _ in range(num_txns):
-                    txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=int(rng.integers(9, 20)))
+                    txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=rng.integers(9, 20))
 
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
@@ -312,7 +312,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             family_members = account_devices_df[account_devices_df['device_id'] == device]['account_id'].values
 
             for _ in range(num_txns):
-                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=int(rng.integers(9, 21)))
+                txn_date = start_time + timedelta(days=int(rng.integers(0, SIMULATION_DAYS), hours=rng.integers(9, 21))
 
                 # 60% within family, 40% outside
                 if rng.random() < 0.6 and len(family_members) > 1:
@@ -371,7 +371,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             # Disperse to mules within 30 minutes
             for mule in members[1:]:
                 mule_device = account_devices_df[account_devices_df['account_id'] == mule]['device_id'].values[0]
-                txn_time = base_time + timedelta(minutes=int(rng.integers(5, 30)))
+                txn_time = base_time + timedelta(minutes=rng.integers(5, 30))
 
                 transactions_list.append({
                     'txn_id': f'TXN_{txn_id:08d}',
@@ -415,7 +415,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                     'amount': transactions_list[-1]['amount'] - rng.integers(100, 500),
                     'channel': 'UPI',
                     'device_id': device,
-                    'timestamp': base_time + timedelta(minutes=int(rng.integers(30, 60))),
+                    'timestamp': base_time + timedelta(minutes=rng.integers(30, 60)),
                 })
                 txn_id += 1
 
@@ -445,7 +445,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             for member in members:
                 device = account_devices_df[account_devices_df['account_id'] == member]['device_id'].values[0]
                 num_burst = rng.integers(20, 50)
-                burst_start = start_time + timedelta(days=fraud_day, hours=int(rng.integers(22, 24)))
+                burst_start = start_time + timedelta(days=fraud_day, hours=rng.integers(22, 24))
 
                 for j in range(num_burst):
                     txn_time = burst_start + timedelta(minutes=j * rng.integers(2, 8))
@@ -469,7 +469,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             for member in members:
                 for _ in range(num_txns_per_member):
                     hour = rng.integers(0, 24)
-                    txn_date = start_time + timedelta(days=int(rng.integers(fraud_day - 1, fraud_day + 2), hours=hour, minutes=int(rng.integers(0, 60)))
+                    txn_date = start_time + timedelta(days=int(rng.integers(fraud_day - 1, fraud_day + 2), hours=hour, minutes=rng.integers(0, 60))
 
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
