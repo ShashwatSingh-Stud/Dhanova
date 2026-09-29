@@ -85,7 +85,17 @@ class RiskModel:
         if self.model is None or self.calibrator is None:
             raise RuntimeError('RiskModel must be trained or loaded before prediction')
         if self.feature_columns is not None:
-            X = X[self.feature_columns]
+            expected = list(self.feature_columns)
+            actual = list(X.columns)
+            missing = [column for column in expected if column not in actual]
+            extra = [column for column in actual if column not in expected]
+            if missing:
+                raise KeyError(f"Missing feature columns: {missing}")
+            if extra or actual != expected:
+                raise ValueError(
+                    "Feature columns must exactly match the trained schema in order: "
+                    f"expected {expected}, got {actual}"
+                )
         raw_proba = self.model.predict_proba(X)[:, 1]
         return np.asarray(self.calibrator.predict(raw_proba), dtype=float)
 
@@ -141,11 +151,12 @@ def score_accounts(features_df: pd.DataFrame, model: RiskModel) -> pd.DataFrame:
     """
     scores = model.predict_score(features_df)
 
-    # Score bands
+    # Score bands: low [0, 40), medium [40, 70), high [70, 100].
     bands = pd.cut(
         scores,
-        bins=[0, 40, 70, 100],
+        bins=[-0.1, 40, 70, 100],
         labels=['low', 'medium', 'high'],
+        right=False,
         include_lowest=True,
     )
 
@@ -180,27 +191,16 @@ def score_account(
     Returns:
         Dict with account_id, score, band
     """
-    from .features import build_features
-    from .graph_engine import build_graph, detect_communities, graph_features as compute_graph_features
+    from .services.feature_pipeline import build_scoring_features
 
-    # Build features
-    behavior_features = build_features(
-        transactions, accounts, account_devices, as_of=as_of
+    # Build the same point-in-time graph + behavior frame used by explanations.
+    account_features = build_scoring_features(
+        accounts=accounts,
+        transactions=transactions,
+        account_devices=account_devices,
+        as_of=as_of,
+        target_account_id=account_id,
     )
-
-    # Graph features (simplified for single account)
-    G = build_graph(transactions, as_of=as_of)
-    communities = detect_communities(G, seed=42)
-    g_features = compute_graph_features(G, communities, [])
-
-    # Merge
-    features = behavior_features.copy()
-    for col in g_features.columns:
-        if col in features.columns:
-            features[col] = g_features[col]
-
-    # Score
-    account_features = features.loc[[account_id]]
     result = score_accounts(account_features, model)
 
     return result.iloc[0].to_dict()

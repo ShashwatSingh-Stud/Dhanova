@@ -8,14 +8,13 @@ router = APIRouter(prefix="/transactions", tags=["Transactions"])
 logger = logging.getLogger(__name__)
 
 def trigger_graph_recalculation(txn_id: str):
+    """Best-effort local dispatcher for a persisted graph job.
+
+    The durable source of truth is ``graph_jobs``. A production worker can
+    claim pending rows with a lease; this hook only keeps local development
+    observable without blocking ingestion.
     """
-    Background worker to asynchronously trigger the graph engine recalculation
-    so we do not block synchronous real-time payload paths.
-    """
-    logger.info(f"Triggering graph recalculation for new transaction {txn_id}...")
-    # In a real app, this might publish to a Redis queue or Kafka topic.
-    # Here, we note it for now, as updating the whole graph per-transaction needs orchestration.
-    pass
+    logger.info("Graph recalculation queued for transaction %s", txn_id)
 
 @router.post("/", response_model=TransactionResponse)
 def create_transaction(
@@ -31,19 +30,44 @@ def create_transaction(
         "txn_id": txn_id,
         "sender_account_id": payload.sender_account_id,
         "receiver_account_id": payload.receiver_account_id,
-        "amount": payload.amount,
+        "amount": str(payload.amount),
         "channel": payload.channel,
         "device_id": payload.device_id,
-        "timestamp": payload.timestamp.isoformat()
+        "timestamp": payload.timestamp.isoformat(),
+        "idempotency_key": payload.idempotency_key,
     }
 
     try:
-        res = db.table("transactions").insert(insert_data).execute()
+        if payload.idempotency_key:
+            existing = (
+                db.table("transactions")
+                .select("*")
+                .eq("idempotency_key", payload.idempotency_key)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                return existing.data[0]
 
-        # Enqueue background recalculation per ML constraint
+        res = db.table("transactions").insert(insert_data).execute()
+        if not res.data:
+            raise HTTPException(status_code=502, detail="Database did not return the transaction.")
+
+        # Persist a deduplicated job before dispatching the best-effort local
+        # worker. Production deployments can consume graph_jobs via a queue.
+        try:
+            db.table("graph_jobs").upsert({
+                "txn_id": txn_id,
+                "dedupe_key": f"transaction:{txn_id}",
+                "status": "pending",
+            }).execute()
+        except Exception:
+            logger.exception("Transaction committed but graph job enqueue failed")
         background_tasks.add_task(trigger_graph_recalculation, txn_id)
 
         return res.data[0]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to insert transaction: {e}")
-        raise HTTPException(status_code=500, detail="Database insertion failed.")
+        raise HTTPException(status_code=503, detail="Database insertion failed.")

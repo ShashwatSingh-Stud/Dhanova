@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.schemas.domain import RiskScoreResponse
 from app.db.supabase import get_db, Client
 from app.services.ml_bridge import score_account_with_explanation
-from app.main import ml_model
-from datetime import datetime
+from app.dependencies import get_model
+from app.scorer import RiskModel
+from datetime import datetime, timezone
 import logging
 
 router = APIRouter(prefix="/upi", tags=["Citizen UPI Check"])
@@ -12,7 +13,8 @@ logger = logging.getLogger(__name__)
 @router.get("/check/{account_id}", response_model=RiskScoreResponse)
 def check_upi_account(
     account_id: str,
-    db: Client = Depends(get_db)
+    db: Client = Depends(get_db),
+    model: RiskModel = Depends(get_model)
 ):
     """
     Citizen-facing Check-UPI API.
@@ -21,8 +23,6 @@ def check_upi_account(
     Note: This route does NOT import ML functions directly.
     All ML integration happens through ml_bridge.py facade.
     """
-    if ml_model is None:
-        raise HTTPException(status_code=503, detail="ML model not loaded. Cannot score account.")
 
     try:
         # Fetch existing risk score from DB if recent
@@ -37,13 +37,19 @@ def check_upi_account(
         if risk_res.data:
             score_record = risk_res.data[0]
             computed_at = datetime.fromisoformat(score_record['computed_at'])
-            age_minutes = (datetime.now() - computed_at).total_seconds() / 60
+            if computed_at.tzinfo is None:
+                computed_at = computed_at.replace(tzinfo=timezone.utc)
+            age_minutes = (
+                datetime.now(timezone.utc) - computed_at
+            ).total_seconds() / 60
 
             if age_minutes < 60:
                 return RiskScoreResponse(**score_record)
 
         # Else recompute via ML bridge (clean abstraction)
-        result = score_account_with_explanation(account_id, ml_model, as_of=datetime.now())
+        result = score_account_with_explanation(
+            account_id, model, as_of=datetime.now(timezone.utc)
+        )
 
         # Persist to DB
         risk_data = {
@@ -54,8 +60,11 @@ def check_upi_account(
                 "shap": result['top_features']
             },
             "explanation_text": result['explanation'],
-            "ring_id": None,  # Ring detection would require graph analysis
-            "computed_at": datetime.now().isoformat()
+            "ring_id": result.get("ring_id"),
+            "model_version": result.get("model_version"),
+            "as_of": result.get("as_of"),
+            "feature_schema_hash": result.get("feature_schema_hash"),
+            "computed_at": result.get("computed_at")
         }
 
         db.table("risk_scores").insert(risk_data).execute()
@@ -64,6 +73,8 @@ def check_upi_account(
 
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error scoring account {account_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to compute risk score.")
+        raise HTTPException(status_code=503, detail="Risk scoring service unavailable.")

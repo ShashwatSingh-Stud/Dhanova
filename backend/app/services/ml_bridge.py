@@ -13,8 +13,10 @@ Responsibilities:
 The ML team can change their implementation without affecting routes.
 """
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
+import hashlib
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,9 @@ def _fetch_ml_dataframes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         'txn_id', 'sender_account_id', 'receiver_account_id', 'amount', 'channel', 'device_id', 'timestamp'
     ])
     if not transactions_df.empty:
-        transactions_df['timestamp'] = pd.to_datetime(transactions_df['timestamp'])
+        transactions_df['timestamp'] = pd.to_datetime(
+            transactions_df['timestamp'], utc=True
+        )
 
     # 3. Account Devices
     devices_res = db.table('account_devices').select('*').execute()
@@ -75,9 +79,13 @@ def score_account_with_explanation(
         }
     """
     if as_of is None:
-        as_of = datetime.now()
+        as_of = datetime.now(timezone.utc)
 
     as_of_ts = pd.Timestamp(as_of)
+    if as_of_ts.tzinfo is None:
+        as_of_ts = as_of_ts.tz_localize("UTC")
+    else:
+        as_of_ts = as_of_ts.tz_convert("UTC")
 
     # Fetch data
     accounts_df, transactions_df, account_devices_df = _fetch_ml_dataframes()
@@ -86,28 +94,31 @@ def score_account_with_explanation(
         raise ValueError(f"Account {account_id} not found in database.")
 
     # Import ML functions (only here, not in routes)
-    from app.scorer import score_account
-    from app.features import build_features
+    from app.scorer import score_accounts
+    from app.services.feature_pipeline import build_scoring_features
     from app.explainer import explain, gemini_explanation_prompt
     from app.services.gemini import generate_explanation
 
-    # Step 1: Score the account
-    score_result = score_account(
-        account_id=account_id,
-        as_of=as_of_ts,
-        transactions=transactions_df,
+    # Build one point-in-time frame for both score and explanation.
+    features_df = build_scoring_features(
         accounts=accounts_df,
+        transactions=transactions_df,
         account_devices=account_devices_df,
-        model=model
+        as_of=as_of_ts,
+        target_account_id=account_id,
+    )
+    score_result = score_accounts(features_df, model).iloc[0].to_dict()
+
+    # SHAP sees the exact ordered row used for the calibrated score.
+    expl_result = explain(
+        account_id,
+        features_df,
+        model.model,
+        top_k=5,
+        scored_score=int(score_result["score"]),
     )
 
-    # Step 2: Build features for explanation
-    features_df = build_features(transactions_df, accounts_df, account_devices_df, as_of=as_of_ts)
-
-    # Step 3: Get SHAP explanation
-    expl_result = explain(account_id, features_df, model.model, top_k=5)
-
-    # Step 4: Generate human explanation via LLM
+    # Generate human explanation via LLM
     prompt = gemini_explanation_prompt(expl_result)
     llm_explanation = generate_explanation(prompt)
 
@@ -119,6 +130,12 @@ def score_account_with_explanation(
         'explanation': llm_explanation,
         'top_features': expl_result['top_reasons'],
         'shap_base_value': expl_result.get('base_value'),
+        'model_version': model.version,
+        'as_of': as_of_ts.isoformat(),
+        'computed_at': datetime.now(timezone.utc).isoformat(),
+        'feature_schema_hash': hashlib.sha256(
+            json.dumps(list(features_df.columns), separators=(",", ":")).encode()
+        ).hexdigest(),
     }
 
 
@@ -133,9 +150,13 @@ def get_account_features(
         Dict mapping feature names to values
     """
     if as_of is None:
-        as_of = datetime.now()
+        as_of = datetime.now(timezone.utc)
 
     as_of_ts = pd.Timestamp(as_of)
+    if as_of_ts.tzinfo is None:
+        as_of_ts = as_of_ts.tz_localize("UTC")
+    else:
+        as_of_ts = as_of_ts.tz_convert("UTC")
 
     accounts_df, transactions_df, account_devices_df = _fetch_ml_dataframes()
 

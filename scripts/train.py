@@ -14,6 +14,12 @@ import pandas as pd
 import numpy as np
 import json
 import time
+import hashlib
+import subprocess
+import platform
+import sklearn
+import xgboost
+import networkx
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import classification_report, confusion_matrix
@@ -51,8 +57,47 @@ def load_data():
     return data
 
 
+def build_snapshot_features(data, as_of):
+    """Build behavior and graph features using only data visible at ``as_of``."""
+    as_of = pd.Timestamp(as_of)
+    if as_of.tzinfo is None:
+        as_of = as_of.tz_localize("UTC")
+    else:
+        as_of = as_of.tz_convert("UTC")
+    transactions = data['transactions'].copy()
+    transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], utc=True)
+    transactions = transactions[transactions['timestamp'] <= as_of].copy()
+    behavior_features = build_features(
+        transactions,
+        data['accounts'],
+        data['account_devices'],
+        as_of=as_of,
+    )
+    graph = build_graph(transactions, as_of=as_of)
+    communities = detect_communities(graph, seed=42)
+    rings = ring_candidates(
+        graph,
+        communities,
+        transactions=transactions,
+        account_devices=data['account_devices'],
+    )
+    suspicious_nodes = set()
+    for members in rings.head(50).get('members', []):
+        suspicious_nodes.update(members)
+    cycles = find_short_cycles(graph, sorted(suspicious_nodes)[:200], max_len=4)
+    graph_frame = compute_graph_features(graph, communities, cycles)
+    features = build_features(
+        transactions,
+        data['accounts'],
+        data['account_devices'],
+        as_of=as_of,
+        graph_features=graph_frame,
+    )
+    return features[FEATURE_COLUMNS]
+
+
 def build_all_features(data):
-    """Build behavior + graph features."""
+    """Build behavior + graph features for the complete snapshot."""
     print("\nBuilding features...")
 
     # Behavior features
@@ -163,7 +208,7 @@ def split_data(features, labels):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
-def train_baselines(X_train, X_test, y_train, y_test):
+def train_baselines(X_train, X_test, y_train, y_test, labels):
     """Train baseline models."""
     print("\nTraining baselines...")
 
@@ -212,17 +257,25 @@ def train_baselines(X_train, X_test, y_train, y_test):
 
     model_no_graph = RiskModel()
 
-    # Simple train without validation split for ablation
-    from sklearn.model_selection import train_test_split
-    X_tr, X_vl, y_tr, y_vl = train_test_split(
-        X_train_no_graph,
-        y_train,
-        test_size=0.2,
-        random_state=42,
-        stratify=y_train if y_train.nunique() > 1 else None,
+    # Use the same group-aware split policy as the full model. Fraud-ring
+    # members must never appear in both ablation train and validation sets.
+    label_groups = labels.set_index('account_id')
+    groups = np.array([
+        str(label_groups.loc[index, 'ring_id'])
+        if bool(label_groups.loc[index, 'is_mule'])
+        else str(index)
+        for index in X_train_no_graph.index
+    ])
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    train_indices, val_indices = next(
+        gss.split(X_train_no_graph, y_train, groups)
     )
+    X_tr = X_train_no_graph.iloc[train_indices]
+    X_vl = X_train_no_graph.iloc[val_indices]
+    y_tr = y_train.iloc[train_indices]
+    y_vl = y_train.iloc[val_indices]
 
-    model_no_graph.train(X_tr, y_tr, None, X_vl, y_vl)
+    model_no_graph.train(X_tr, y_tr, groups[train_indices], X_vl, y_vl)
 
     baselines['xgboost_no_graph'] = evaluate_model(model_no_graph, X_test_no_graph, y_test, name="XGBoost (no graph)")
 
@@ -256,7 +309,15 @@ def train_final_model(X_train, X_val, X_test, y_train, y_val, y_test):
     return model, metrics
 
 
-def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval):
+def generate_reports(
+    model,
+    X_test,
+    y_test,
+    baselines,
+    final_metrics,
+    ring_eval,
+    temporal_cutoffs=None,
+):
     """Generate evaluation reports and plots."""
     print("\nGenerating reports...")
 
@@ -271,6 +332,15 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
     y_proba = model.predict_proba(X_test)
     threshold = 0.5
     cm = confusion_matrix(y_test, (y_proba >= threshold).astype(int)).tolist()
+    try:
+        git_commit = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], cwd=PROJECT_ROOT, text=True
+        ).strip()
+    except Exception:
+        git_commit = None
+    feature_schema_hash = hashlib.sha256(
+        json.dumps(list(X_test.columns), separators=(",", ":")).encode()
+    ).hexdigest()
     metrics_report = {
         'final_model': final_metrics,
         'baselines': baselines,
@@ -282,6 +352,18 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
         'training_seed': 42,
         'model_version': model.version,
         'feature_columns': list(X_test.columns),
+        'feature_schema_hash': feature_schema_hash,
+        'split_strategy': 'temporal snapshots at 70/85/100 percent plus group-aware ring split',
+        'temporal_cutoffs': temporal_cutoffs or {},
+        'temporal_leakage_status': 'feature snapshots use as_of cutoffs',
+        'git_commit': git_commit,
+        'library_versions': {
+            'python': platform.python_version(),
+            'pandas': pd.__version__,
+            'scikit_learn': sklearn.__version__,
+            'xgboost': xgboost.__version__,
+            'networkx': networkx.__version__,
+        },
         'single_account_scoring_latency_ms': float(scoring_latency_ms),
         'decision_threshold': threshold,
         'confusion_matrix_labels': ['clear', 'mule'],
@@ -363,17 +445,42 @@ def main():
     # Build features
     features, rings, ring_eval = build_all_features(data)
 
-    # Split data
+    # Split account groups, then rebuild every split's features from a
+    # point-in-time snapshot to prevent future graph/behavior leakage.
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(features, data['labels'])
+    timestamps = pd.to_datetime(data['transactions']['timestamp'], utc=True)
+    start = timestamps.min()
+    end = timestamps.max()
+    train_cutoff = start + (end - start) * 0.70
+    val_cutoff = start + (end - start) * 0.85
+    print(f"\nTemporal cutoffs: train={train_cutoff}, val={val_cutoff}, test={end}")
+    train_snapshot = build_snapshot_features(data, train_cutoff)
+    val_snapshot = build_snapshot_features(data, val_cutoff)
+    test_snapshot = build_snapshot_features(data, end)
+    X_train = train_snapshot.reindex(X_train.index).fillna(0)
+    X_val = val_snapshot.reindex(X_val.index).fillna(0)
+    X_test = test_snapshot.reindex(X_test.index).fillna(0)
 
     # Train baselines
-    baselines = train_baselines(X_train, X_test, y_train, y_test)
+    baselines = train_baselines(X_train, X_test, y_train, y_test, data['labels'])
 
     # Train final model
     model, final_metrics = train_final_model(X_train, X_val, X_test, y_train, y_val, y_test)
 
     # Generate reports
-    generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
+    generate_reports(
+        model,
+        X_test,
+        y_test,
+        baselines,
+        final_metrics,
+        ring_eval,
+        temporal_cutoffs={
+            'train': train_cutoff.isoformat(),
+            'validation': val_cutoff.isoformat(),
+            'test': end.isoformat(),
+        },
+    )
 
     # Test explanations
     print("\nGenerating sample explanations...")

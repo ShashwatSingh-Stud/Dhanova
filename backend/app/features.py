@@ -231,7 +231,7 @@ def build_features(
                     'community_size', 'community_internal_flow_ratio',
                     'community_density', 'in_short_cycle']:
             if col in graph_features.columns:
-                behavior_features[col] = graph_features[col]
+                behavior_features[col] = graph_features[col].reindex(behavior_features.index).fillna(0)
             else:
                 behavior_features[col] = 0
     else:

@@ -555,8 +555,15 @@ def evaluate_rings(detected_rings: pd.DataFrame, labels: pd.DataFrame) -> Dict[s
         'per_archetype': {},
     }
     if not true_rings or detected_rings is None or detected_rings.empty:
+        result['candidate_sources'] = {}
         for archetype, group in labels[labels['is_mule'] == True].groupby('ring_archetype'):
-            result['per_archetype'][archetype] = {'ground_truth': int(group['ring_id'].nunique()), 'detected': 0, 'recall': 0.0}
+            result['per_archetype'][archetype] = {
+                'ground_truth': int(group['ring_id'].nunique()),
+                'detected': 0,
+                'recall': 0.0,
+                'precision': 0.0,
+                'f1': 0.0,
+            }
         return result
 
     pairs = []
@@ -583,14 +590,23 @@ def evaluate_rings(detected_rings: pd.DataFrame, labels: pd.DataFrame) -> Dict[s
     )
     result['ring_precision'] = len(used_detected) / len(detected_rings) if len(detected_rings) else 0.0
     result['ring_recall'] = len(used_truth) / len(true_rings) if true_rings else 0.0
+    result['false_positive_count'] = int(len(detected_rings) - len(used_detected))
+    result['precision_at_k'] = {}
+    for k in (10, 25, 50):
+        top = set(detected_rings.head(k).index)
+        result['precision_at_k'][str(k)] = float(len(top & used_detected) / min(k, len(detected_rings))) if detected_rings is not None and len(detected_rings) else 0.0
 
     for archetype, group in labels[labels['is_mule'] == True].groupby('ring_archetype'):
         ids = set(group['ring_id'])
         detected = len(ids & used_truth)
+        recall = detected / len(ids) if ids else 0.0
         result['per_archetype'][archetype] = {
             'ground_truth': len(ids),
             'detected': detected,
-            'recall': detected / len(ids) if ids else 0.0,
+            'recall': recall,
+            'precision': result['ring_precision'],
+            'f1': (2 * result['ring_precision'] * recall / (result['ring_precision'] + recall))
+                if result['ring_precision'] + recall else 0.0,
         }
     return result
 

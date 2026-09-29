@@ -1,6 +1,8 @@
 from pydantic import BaseModel, ConfigDict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
+from decimal import Decimal
+from pydantic import Field, field_validator
 
 # =======================
 # Account Schemas
@@ -27,12 +29,28 @@ class AccountDeviceMap(BaseModel):
 # Transaction Schemas
 # =======================
 class TransactionCreate(BaseModel):
-    sender_account_id: str
-    receiver_account_id: str
-    amount: float
-    channel: str
-    device_id: Optional[str] = None
-    timestamp: datetime = datetime.now()
+    sender_account_id: str = Field(min_length=1, max_length=128)
+    receiver_account_id: str = Field(min_length=1, max_length=128)
+    amount: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
+    channel: str = Field(min_length=1, max_length=32)
+    device_id: Optional[str] = Field(default=None, max_length=128)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("timestamp")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @field_validator("receiver_account_id")
+    @classmethod
+    def reject_self_transfer(cls, value: str, info):
+        sender = info.data.get("sender_account_id")
+        if sender and value == sender:
+            raise ValueError("sender and receiver must be different")
+        return value
 
 class TransactionResponse(TransactionCreate):
     txn_id: str
@@ -48,14 +66,18 @@ class RiskScoreResponse(BaseModel):
     explanation_text: Optional[str] = None
     ring_id: Optional[str] = None
     computed_at: datetime
+    as_of: Optional[datetime] = None
+    model_version: Optional[str] = None
+    feature_schema_hash: Optional[str] = None
 
 # =======================
 # Officer Action Schemas
 # =======================
 class HoldActionRequest(BaseModel):
-    account_id: str
-    reason: str
-    officer_id: str
+    account_id: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=3, max_length=2000)
+    officer_id: str = Field(min_length=1, max_length=128)
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
 
 class HoldActionResponse(BaseModel):
     action_id: str
@@ -70,8 +92,8 @@ class HoldActionResponse(BaseModel):
 # Chat Schemas
 # =======================
 class ChatRequest(BaseModel):
-    account_id: str
-    question: str
+    account_id: str = Field(min_length=1, max_length=128)
+    question: str = Field(min_length=1, max_length=2000)
 
 class ChatResponse(BaseModel):
     answer: str

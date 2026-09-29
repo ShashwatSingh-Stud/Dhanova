@@ -43,6 +43,7 @@ def explain(
     features: pd.DataFrame,
     model,
     top_k: int = 5,
+    scored_score: int | None = None,
 ) -> Dict:
     """
     Generate SHAP-based explanation for an account's risk score.
@@ -71,7 +72,7 @@ def explain(
     raw_prediction = model.predict_proba(account_features)
     if raw_prediction.ndim == 2:
         raw_prediction = raw_prediction[:, 1]
-    score = int(float(raw_prediction[0]) * 100)
+    score = scored_score if scored_score is not None else int(float(raw_prediction[0]) * 100)
 
     # SHAP explanation
     explainer = shap.TreeExplainer(model)
