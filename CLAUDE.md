@@ -4,6 +4,13 @@
 
 **What:** Graph-based AI system detecting mule accounts and fraud rings in India's digital payment network. Explainable risk scores + RBI 2026-compliant hold/release workflow.
 
+## ML <-> Backend Integration Contracts (PRD Addenda)
+- **Model State**: The FastAPI backend is responsible for gracefully loading and persisting the `RiskModel` (`.joblib` files) in memory upon application startup via `RiskModel.load('models')`.
+- **Data Handoff Format**: All database queries must be cast to Pandas DataFrames explicitly matching the schemas/columns defined by ML (`['account_id', ...]`, `['txn_id', ...]`, `['account_id', 'device_id']`) before passing to `score_account` or `build_features`.
+- **Temporal Bounds**: The backend must track and pass `as_of` timestamps to all ML functions for point-in-time accuracy to prevent future data leakage.
+- **LLM Prompting Responsibility**: The ML layer owns the creation of the exact explanation prompt text (via `gemini_explanation_prompt` and SHAP). The Backend layer owns securely executing this string against the Gemini API and handling network failures.
+- **Performance**: Due to the scaling limitations of `networkx` graph computation, the backend will enqueue graph feature calculations asynchronously (or batch them) rather than blocking real-time transaction ingestion APIs.
+
 ## Data Model (from PRD Section 8)
 - **accounts** — account_id PK, holder_name, bank_name, account_age_days, kyc_level, status (clear/flagged/on_hold)
 - **devices** — device_id PK, device_fingerprint; junction: account_devices(account_id, device_id)
