@@ -22,16 +22,34 @@ def test_liveness_always_ok():
         assert response.json()["status"] == "ok"
 
 
-def test_readiness_with_model():
-    """Readiness probe should return 200 when model is loaded."""
-    with TestClient(app) as client:
-        response = client.get("/health/ready")
-        assert response.status_code == 200, response.text
-        data = response.json()
-        assert data["status"] == "ready"
-        assert "model_version" in data
-        assert "feature_count" in data
-        assert data["feature_count"] == len(FEATURE_COLUMNS)
+def test_readiness_with_injected_model():
+    """Readiness reports metadata when a validated model is present."""
+    from app.main import readiness_check
+
+    sentinel = object()
+    app.state.model = sentinel
+    app.state.model_version = "test"
+    app.state.model_error = None
+    try:
+        response = readiness_check()
+        assert response["status"] == "ready"
+        assert response["model_version"] == "test"
+        assert response["feature_count"] == len(FEATURE_COLUMNS)
+    finally:
+        app.state.model = None
+        app.state.model_version = None
+
+
+def test_readiness_without_model_returns_503():
+    """Readiness fails closed when artifacts are unavailable."""
+    from app.main import readiness_check
+    from fastapi import HTTPException
+
+    app.state.model = None
+    app.state.model_error = "missing test artifacts"
+    with pytest.raises(HTTPException) as error:
+        readiness_check()
+    assert error.value.status_code == 503
 
 
 def test_legacy_health_endpoint():

@@ -18,6 +18,9 @@ from typing import Dict, Any, Optional
 import hashlib
 import json
 import logging
+import time
+
+from app.middleware import counters
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,8 @@ def score_account_with_explanation(
     from app.explainer import explain, gemini_explanation_prompt
     from app.services.gemini import generate_explanation
 
+    start_time = time.monotonic()
+
     # Build one point-in-time frame for both score and explanation.
     features_df = build_scoring_features(
         accounts=accounts_df,
@@ -117,6 +122,9 @@ def score_account_with_explanation(
         top_k=5,
         scored_score=int(score_result["score"]),
     )
+
+    duration = time.monotonic() - start_time
+    counters.record_scoring(duration)
 
     # Generate human explanation via LLM
     prompt = gemini_explanation_prompt(expl_result)

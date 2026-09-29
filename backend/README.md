@@ -58,9 +58,9 @@ uvicorn app.main:app --reload --port 8000
 ## Database migrations and seed data
 
 Apply `backend/migrations/001_initial_schema.sql` with the Supabase CLI or SQL
-editor using a migration/service role. It creates the seven backend tables,
-foreign keys, numeric money columns, UTC timestamps, indexes, an idempotency
-constraint, RLS enablement, and an atomic hold RPC.
+editor using a migration/service role. It creates the eight backend tables,
+foreign keys, numeric money columns, UTC timestamps, indexes, idempotency
+constraints, RLS enablement, atomic hold RPCs, and durable graph-job RPCs.
 
 To validate generated Parquet data without writing to Supabase:
 ```bash
@@ -91,15 +91,33 @@ Supabase or Gemini.
 pytest app/test_api.py -v
 ```
 
+## Worker and operations
+
+The durable graph worker claims `graph_jobs` through leased Supabase RPCs and
+retries failures with bounded exponential backoff. Run the worker separately:
+
+```bash
+python -m app.workers.run_graph_worker
+```
+
+The callback is intentionally deployment-specific: wire it to the as-of graph
+recomputation service before enabling production graph result updates. Ingestion
+persists the job and remains non-blocking.
+
+When `AUTH_REQUIRED=true`, Supabase JWTs are required and officer routes accept
+only officer, supervisor, or admin roles. Local development uses an explicit
+admin bypass only when `AUTH_REQUIRED=false`.
+
 ## Architecture
 
-- **ML Integration**: Consumes the ML model via `scorer.py`, `features.py`, `explainer.py`, `graph_engine.py`
-- **Database**: Supabase PostgreSQL
-- **LLM**: Google Gemini for explanation generation
-- **Async**: Background tasks for heavy graph computation
+- **ML Integration**: Shared point-in-time features, calibrated XGBoost, SHAP, and graph candidates
+- **Database**: Supabase PostgreSQL with eight tables and atomic/RPC workflows
+- **LLM**: Maintained `google-genai` adapter with deterministic fallback
+- **Async**: Durable leased graph jobs, not an in-process background-task queue
+- **Frontend**: No frontend source is included in this repository; see `docs/FRONTEND_SCOPE.md`
 
 ## Notes
 
 - ML model training is handled separately by the ML team
 - This backend only integrates and serves the trained model
-- Graph features are computed asynchronously to avoid blocking requests
+- Synthetic evaluation metrics are not production accuracy estimates

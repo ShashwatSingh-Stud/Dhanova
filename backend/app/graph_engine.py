@@ -33,8 +33,11 @@ def build_graph(
         raise ValueError(f'Missing transaction columns: {sorted(missing)}')
 
     tx = transactions.copy()
+    tx['timestamp'] = pd.to_datetime(tx['timestamp'], utc=True, format='mixed')
     if as_of is not None:
-        tx = tx[tx['timestamp'] <= as_of]
+        cutoff = pd.Timestamp(as_of)
+        cutoff = cutoff.tz_localize('UTC') if cutoff.tzinfo is None else cutoff.tz_convert('UTC')
+        tx = tx[tx['timestamp'] <= cutoff]
 
     graph = nx.DiGraph()
     if tx.empty:
@@ -105,7 +108,8 @@ def _candidate_stats(
     if len(member_set) < 3:
         return None
 
-    tx = transactions
+    tx = transactions.copy()
+    tx['timestamp'] = pd.to_datetime(tx['timestamp'], utc=True, format='mixed')
     if burst_start is not None:
         tx = tx[(tx['timestamp'] >= burst_start) & (tx['timestamp'] <= burst_end)]
     if tx.empty:
@@ -184,7 +188,7 @@ def _temporal_candidates(
 ) -> List[dict]:
     """Find hub, cycle, and shared-device candidates in short time windows."""
     tx = transactions.copy()
-    tx['timestamp'] = pd.to_datetime(tx['timestamp'])
+    tx['timestamp'] = pd.to_datetime(tx['timestamp'], utc=True, format='mixed')
     # Keep medium/high-value transfers to suppress routine noise. Device-farm
     # rings are recovered separately from their shared-device groups, so the
     # temporal topology stage can use the stronger fraud-ring amount bands.
@@ -322,8 +326,8 @@ def _temporal_candidates(
         # Circular layering: use a longer window and high-value edges so a
         # cycle is not lost inside the much larger routine-traffic component.
         cycle_end = window_start + pd.Timedelta(hours=max(window_hours, 8))
-        cycle_tx = transactions.copy()
-        cycle_tx['timestamp'] = pd.to_datetime(cycle_tx['timestamp'])
+        cycle_tx = tx.copy()
+        cycle_tx['timestamp'] = pd.to_datetime(cycle_tx['timestamp'], utc=True, format='mixed')
         cycle_tx = cycle_tx[
             (cycle_tx['timestamp'] >= window_start)
             & (cycle_tx['timestamp'] <= cycle_end)
@@ -373,7 +377,10 @@ def _community_candidates(
     for community in communities:
         if min_size <= len(community) <= max_size:
             stats = _candidate_stats(transactions, community, 'community')
-            if stats is not None:
+            # A community is only a ring candidate when it has at least as
+            # many distinct directed links as members; this rejects ordinary
+            # two-edge chains that happen to share a connected component.
+            if stats is not None and stats['internal_edge_count'] >= len(community):
                 candidates.append(stats)
     return candidates
 

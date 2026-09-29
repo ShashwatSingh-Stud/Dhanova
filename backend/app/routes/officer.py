@@ -44,6 +44,7 @@ def place_hold(
             "p_action_id": action_id,
             "p_hold_start": hold_start.isoformat(),
             "p_hold_expiry": hold_expiry.isoformat(),
+            "p_idempotency_key": payload.idempotency_key,
         }).execute()
         if not result.data:
             raise HTTPException(status_code=502, detail="Hold transaction returned no result")
@@ -57,6 +58,8 @@ def place_hold(
             raise HTTPException(status_code=409, detail="An active hold already exists.")
         if "account_not_found" in detail:
             raise HTTPException(status_code=404, detail="Account not found.")
+        if "idempotency_conflict" in detail:
+            raise HTTPException(status_code=409, detail="Idempotency key is already used for another hold.")
         raise HTTPException(status_code=503, detail="Failed to place hold.")
 
 @router.post("/release/{action_id}")

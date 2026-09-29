@@ -45,11 +45,14 @@ def build_features(
         DataFrame indexed by account_id with FEATURE_COLUMNS
     """
 
-    # Filter transactions by as_of
+    # Normalize timestamps before applying the point-in-time cutoff. This keeps
+    # naive database exports and aware API timestamps comparable in UTC.
+    tx = transactions.copy()
+    tx['timestamp'] = pd.to_datetime(tx['timestamp'], utc=True)
     if as_of is not None:
-        tx = transactions[transactions['timestamp'] <= as_of].copy()
-    else:
-        tx = transactions.copy()
+        cutoff = pd.Timestamp(as_of)
+        cutoff = cutoff.tz_localize('UTC') if cutoff.tzinfo is None else cutoff.tz_convert('UTC')
+        tx = tx[tx['timestamp'] <= cutoff].copy()
 
     # Get all account IDs before any early return so dormant accounts remain
     # scoreable for an as-of cutoff with no observed activity.

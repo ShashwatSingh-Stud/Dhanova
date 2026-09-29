@@ -49,7 +49,20 @@ def create_transaction(
             if existing.data:
                 return existing.data[0]
 
-        res = db.table("transactions").insert(insert_data).execute()
+        try:
+            res = db.table("transactions").insert(insert_data).execute()
+        except Exception as insert_error:
+            if payload.idempotency_key and "duplicate" in str(insert_error).lower():
+                existing = (
+                    db.table("transactions")
+                    .select("*")
+                    .eq("idempotency_key", payload.idempotency_key)
+                    .limit(1)
+                    .execute()
+                )
+                if existing.data:
+                    return existing.data[0]
+            raise
         if not res.data:
             raise HTTPException(status_code=502, detail="Database did not return the transaction.")
 

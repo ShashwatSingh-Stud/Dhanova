@@ -7,6 +7,7 @@ import json
 from app.core.config import settings
 from app.scorer import RiskModel
 from app.features import FEATURE_COLUMNS
+from app.middleware import ObservabilityMiddleware, counters
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,9 @@ if _cors_origins:
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
 
+# Observability: request IDs, structured logs, latency counters
+app.add_middleware(ObservabilityMiddleware)
+
 # Import and include routers
 from app.routes import transactions, upi_check, officer, chat
 
@@ -131,3 +135,9 @@ def health_check():
         "status": "ok",
         "model_loaded": getattr(app.state, "model", None) is not None
     }
+
+
+@app.get("/metrics")
+def metrics():
+    """Internal metrics endpoint (do not expose to public ingress)."""
+    return counters.snapshot()

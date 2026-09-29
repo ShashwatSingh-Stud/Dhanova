@@ -96,6 +96,42 @@ def build_snapshot_features(data, as_of):
     return features[FEATURE_COLUMNS]
 
 
+def evaluate_ring_snapshot(data, as_of, seed=42):
+    """Evaluate candidates using only transactions visible at one cutoff."""
+    cutoff = pd.Timestamp(as_of)
+    cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+    transactions = data['transactions'].copy()
+    transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], utc=True)
+    visible = transactions[transactions['timestamp'] <= cutoff].copy()
+    graph = build_graph(visible, as_of=cutoff)
+    communities = detect_communities(graph, seed=seed)
+    candidates = ring_candidates(
+        graph,
+        communities,
+        transactions=visible,
+        account_devices=data['account_devices'],
+    )
+    metrics = evaluate_rings(candidates, data['labels'])
+    metrics['as_of'] = cutoff.isoformat()
+    metrics['visible_transaction_count'] = int(len(visible))
+    return metrics
+
+
+def evaluate_ring_snapshots(data, cutoffs):
+    """Return cutoff-specific and multi-seed ring metrics."""
+    by_cutoff = {
+        name: evaluate_ring_snapshot(data, cutoff)
+        for name, cutoff in cutoffs.items()
+    }
+    final_cutoff = cutoffs['test']
+    seed_runs = [evaluate_ring_snapshot(data, final_cutoff, seed) for seed in (42, 43, 44)]
+    aggregate = {}
+    for metric in ('ring_precision', 'ring_recall', 'false_positive_count'):
+        values = np.asarray([run.get(metric, 0.0) for run in seed_runs], dtype=float)
+        aggregate[metric] = {'mean': float(values.mean()), 'std': float(values.std())}
+    return {'by_cutoff': by_cutoff, 'multi_seed': aggregate}
+
+
 def build_all_features(data):
     """Build behavior + graph features for the complete snapshot."""
     print("\nBuilding features...")
@@ -317,6 +353,7 @@ def generate_reports(
     final_metrics,
     ring_eval,
     temporal_cutoffs=None,
+    latency_metrics=None,
 ):
     """Generate evaluation reports and plots."""
     print("\nGenerating reports...")
@@ -355,7 +392,11 @@ def generate_reports(
         'feature_schema_hash': feature_schema_hash,
         'split_strategy': 'temporal snapshots at 70/85/100 percent plus group-aware ring split',
         'temporal_cutoffs': temporal_cutoffs or {},
-        'temporal_leakage_status': 'feature snapshots use as_of cutoffs',
+        'temporal_leakage_status': (
+            'feature and ring snapshots use as_of cutoffs; eventual labels are used '
+            'only for retrospective evaluation and may include future-known membership'
+        ),
+        'ring_snapshot_evaluation': ring_eval.get('snapshot_evaluation', {}),
         'git_commit': git_commit,
         'library_versions': {
             'python': platform.python_version(),
@@ -365,6 +406,10 @@ def generate_reports(
             'networkx': networkx.__version__,
         },
         'single_account_scoring_latency_ms': float(scoring_latency_ms),
+        'latency_metrics_ms': latency_metrics or {
+            'model_inference': {'p50': float(scoring_latency_ms), 'p95': float(scoring_latency_ms), 'p99': float(scoring_latency_ms)},
+            'total': {'p50': float(scoring_latency_ms), 'p95': float(scoring_latency_ms), 'p99': float(scoring_latency_ms)},
+        },
         'decision_threshold': threshold,
         'confusion_matrix_labels': ['clear', 'mule'],
         'confusion_matrix': cm,
@@ -467,6 +512,33 @@ def main():
     # Train final model
     model, final_metrics = train_final_model(X_train, X_val, X_test, y_train, y_val, y_test)
 
+    cutoff_map = {
+        'train': train_cutoff,
+        'validation': val_cutoff,
+        'test': end,
+    }
+    snapshot_evaluation = evaluate_ring_snapshots(data, cutoff_map)
+    ring_eval['snapshot_evaluation'] = snapshot_evaluation
+
+    # Benchmark the model-only path with percentile reporting. End-to-end
+    # feature assembly is reported separately when a scoring frame is built.
+    timings = []
+    for _ in range(20):
+        started = time.perf_counter()
+        model.predict_proba(X_test.iloc[:1])
+        timings.append((time.perf_counter() - started) * 1000)
+    latency_metrics = {
+        'model_inference': {
+            key: float(np.percentile(timings, percentile))
+            for key, percentile in [('p50', 50), ('p95', 95), ('p99', 99)]
+        },
+        'total': {
+            key: float(np.percentile(timings, percentile))
+            for key, percentile in [('p50', 50), ('p95', 95), ('p99', 99)]
+        },
+        'scope': 'model inference over precomputed one-row features; feature assembly benchmark is not included',
+    }
+
     # Generate reports
     generate_reports(
         model,
@@ -475,11 +547,8 @@ def main():
         baselines,
         final_metrics,
         ring_eval,
-        temporal_cutoffs={
-            'train': train_cutoff.isoformat(),
-            'validation': val_cutoff.isoformat(),
-            'test': end.isoformat(),
-        },
+        temporal_cutoffs={name: cutoff.isoformat() for name, cutoff in cutoff_map.items()},
+        latency_metrics=latency_metrics,
     )
 
     # Test explanations

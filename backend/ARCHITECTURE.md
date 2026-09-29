@@ -32,7 +32,7 @@ This is the **ONLY** backend module that imports ML functions directly:
 **Exception**: `main.py` imports `RiskModel` to load artifacts at startup:
 ```python
 from app.scorer import RiskModel
-ml_model = RiskModel.load('backend/models/')
+ml_model = RiskModel.load('models/')
 ```
 
 This is acceptable because:
@@ -101,7 +101,7 @@ backend/app/
 
 ## What Backend Owns
 
-- ✅ Loading model artifacts from `backend/models/`
+- ✅ Loading model artifacts from the configured `MODEL_DIR` (repository default: `models/`)
 - ✅ API routing and validation
 - ✅ Supabase queries
 - ✅ Converting SQL results to Pandas DataFrames

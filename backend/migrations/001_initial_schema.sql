@@ -71,8 +71,14 @@ create table if not exists public.graph_jobs (
     available_at timestamptz not null default now(),
     locked_until timestamptz,
     last_error text,
+    worker_id text,
+    max_attempts integer not null default 5 check (max_attempts > 0),
+    completed_at timestamptz,
     created_at timestamptz not null default now()
 );
+
+create index if not exists graph_jobs_claim_idx
+    on public.graph_jobs(status, available_at, locked_until);
 
 create table if not exists public.hold_actions (
     action_id uuid primary key,
@@ -82,6 +88,7 @@ create table if not exists public.hold_actions (
     hold_start timestamptz not null,
     hold_expiry timestamptz not null,
     status text not null default 'active' check (status in ('active', 'released', 'expired')),
+    idempotency_key text unique,
     created_at timestamptz not null default now()
 );
 
@@ -105,20 +112,90 @@ create or replace function public.place_hold_atomic(
     p_reason text,
     p_action_id uuid,
     p_hold_start timestamptz,
-    p_hold_expiry timestamptz
+    p_hold_expiry timestamptz,
+    p_idempotency_key text default null
 ) returns public.hold_actions
 language plpgsql security definer set search_path = public as $$
 declare result_row public.hold_actions;
 begin
+    if p_idempotency_key is not null then
+        select * into result_row from public.hold_actions
+        where idempotency_key = p_idempotency_key for update;
+        if found then
+            if result_row.account_id <> p_account_id
+                or result_row.officer_id <> p_officer_id
+                or result_row.reason <> p_reason then
+                raise exception 'idempotency_conflict';
+            end if;
+            return result_row;
+        end if;
+    end if;
     perform 1 from public.accounts where account_id = p_account_id for update;
     if not found then raise exception 'account_not_found'; end if;
     if exists (select 1 from public.hold_actions where account_id = p_account_id and status = 'active') then
         raise exception 'active_hold_exists';
     end if;
-    insert into public.hold_actions(action_id, account_id, officer_id, reason, hold_start, hold_expiry, status)
-    values (p_action_id, p_account_id, p_officer_id, p_reason, p_hold_start, p_hold_expiry, 'active')
+    insert into public.hold_actions(action_id, account_id, officer_id, reason, hold_start, hold_expiry, status, idempotency_key)
+    values (p_action_id, p_account_id, p_officer_id, p_reason, p_hold_start, p_hold_expiry, 'active', p_idempotency_key)
     returning * into result_row;
     update public.accounts set status = 'on_hold', updated_at = now() where account_id = p_account_id;
+    return result_row;
+end;
+$$;
+
+create or replace function public.claim_graph_job(
+    p_worker_id text,
+    p_lease_seconds integer default 120
+) returns public.graph_jobs
+language plpgsql security definer set search_path = public as $$
+declare result_row public.graph_jobs;
+begin
+    update public.graph_jobs
+    set status = 'pending', locked_until = null, worker_id = null
+    where status = 'running' and locked_until < now();
+    select * into result_row from public.graph_jobs
+    where status = 'pending' and available_at <= now()
+    order by available_at, created_at
+    for update skip locked limit 1;
+    if not found then return null; end if;
+    update public.graph_jobs
+    set status = 'running', attempts = attempts + 1,
+        locked_until = now() + make_interval(secs => p_lease_seconds),
+        worker_id = p_worker_id
+    where job_id = result_row.job_id
+    returning * into result_row;
+    return result_row;
+end;
+$$;
+
+create or replace function public.complete_graph_job(p_job_id uuid)
+returns public.graph_jobs
+language plpgsql security definer set search_path = public as $$
+declare result_row public.graph_jobs;
+begin
+    update public.graph_jobs
+    set status = 'succeeded', locked_until = null, completed_at = now()
+    where job_id = p_job_id and status = 'running'
+    returning * into result_row;
+    return result_row;
+end;
+$$;
+
+create or replace function public.fail_graph_job(
+    p_job_id uuid,
+    p_error text,
+    p_retry_delay_seconds integer default 30
+) returns public.graph_jobs
+language plpgsql security definer set search_path = public as $$
+declare result_row public.graph_jobs;
+begin
+    update public.graph_jobs
+    set status = case when attempts >= max_attempts then 'failed' else 'pending' end,
+        available_at = case when attempts >= max_attempts then available_at
+            else now() + make_interval(secs => p_retry_delay_seconds) end,
+        locked_until = null, last_error = left(p_error, 2000), worker_id = null
+    where job_id = p_job_id and status = 'running'
+    returning * into result_row;
     return result_row;
 end;
 $$;

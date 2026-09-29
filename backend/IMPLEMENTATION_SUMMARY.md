@@ -1,14 +1,14 @@
 # Dhanova Backend Implementation Summary
 
 **Date:** 2026-09-29  
-**Status:** ✅ Complete - Ready for Integration Testing
+**Status:** Production-readiness implementation complete; external Supabase, Gemini, and artifact-delivery checks remain deployment-specific
 
 ## What Was Implemented
 
 ### 1. Core Infrastructure
 - **FastAPI Application** (`app/main.py`)
   - Lifespan management for ML model loading
-  - Global model state cached in memory
+  - Validated model state cached in app state
   - Router registration for all endpoints
   - Health check endpoint
 
@@ -30,7 +30,7 @@
   - **Only consumes ML functions as external dependencies**
 
 ### 4. LLM Service (`app/services/gemini.py`)
-- Executes ML-generated prompts against Google Gemini API
+- Executes ML-generated prompts through the maintained `google-genai` adapter
 - Graceful fallback for API failures
 - Follows the contract: ML creates prompt, Backend executes API
 
@@ -38,7 +38,7 @@
 
 #### Transactions (`app/routes/transactions.py`)
 - `POST /transactions/` - Real-time transaction ingestion
-- Background task queue for async graph recalculation
+- Durable `graph_jobs` enqueueing; a separate leased worker processes jobs
 - Prevents blocking on NetworkX heavy operations
 
 #### UPI Check (`app/routes/upi_check.py`)
@@ -180,13 +180,13 @@ All tables from `CLAUDE.md` are integrated:
 - `backend/app/data_gen.py`
 - `backend/app/test_data_gen.py`
 
-## Known Limitations
+## Deployment-specific follow-ups
 
-1. **No ML Model Yet**: Backend expects `backend/models/` directory with trained artifacts
-2. **No Database Seeding**: Supabase tables need manual creation or migration scripts
-3. **No Authentication**: Officer/Admin endpoints need auth middleware
-4. **Simplified Graph Handling**: Full batch graph recalculation needs queue infrastructure
-5. **No Rate Limiting**: Production needs rate limits on public endpoints
+1. Supply and verify the model bundle through CI release assets or object storage; binaries remain untracked.
+2. Apply the Supabase migration and run a disposable integration test with deployment credentials.
+3. Wire the graph worker's domain callback to persist graph results for the target deployment.
+4. Add infrastructure rate limits and centralized metrics according to the hosting platform.
+5. The repository contains no frontend; the API boundary is documented separately.
 
 ## Production Readiness Checklist
 
