@@ -51,9 +51,11 @@ def build_features(
     else:
         tx = transactions.copy()
 
+    # Get all account IDs before any early return so dormant accounts remain
+    # scoreable for an as-of cutoff with no observed activity.
+    all_accounts = accounts['account_id'].unique()
     if len(tx) == 0:
-        # Return empty features with correct schema
-        return pd.DataFrame(columns=['account_id'] + FEATURE_COLUMNS).set_index('account_id')
+        return pd.DataFrame(0.0, index=pd.Index(all_accounts, name='account_id'), columns=FEATURE_COLUMNS)
 
     # Get all account IDs
     all_accounts = accounts['account_id'].unique()

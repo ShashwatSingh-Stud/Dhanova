@@ -13,9 +13,10 @@ sys.path.insert(0, str(PROJECT_ROOT / 'backend'))
 import pandas as pd
 import numpy as np
 import json
+import time
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import warnings
 
@@ -70,17 +71,23 @@ def build_all_features(data):
     communities = detect_communities(G, seed=42)
     print(f"     Detected {len(communities)} communities")
 
-    rings = ring_candidates(G, communities)
+    rings = ring_candidates(
+        G,
+        communities,
+        transactions=data['transactions'],
+        account_devices=data['account_devices'],
+    )
     print(f"     Found {len(rings)} ring candidates")
 
     # Ring evaluation
     ring_eval = evaluate_rings(rings, data['labels'])
     print(f"     Ring Precision: {ring_eval['ring_precision']:.2%} | Ring Recall: {ring_eval['ring_recall']:.2%}")
+    print(f"     Per-archetype recall: {ring_eval.get('per_archetype', {})}")
 
     # Find cycles in top suspicious communities
     suspicious_nodes = []
     if len(rings) > 0:
-        for members in rings.head(20)['members']:
+        for members in rings.head(50)['members']:
             suspicious_nodes.extend(members)
     suspicious_nodes = list(set(suspicious_nodes))[:200]  # Limit for speed
 
@@ -257,12 +264,28 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
     reports_dir.mkdir(exist_ok=True)
 
     # Metrics JSON
+    start = time.perf_counter()
+    for _ in range(3):
+        model.predict_proba(X_test.iloc[:1])
+    scoring_latency_ms = (time.perf_counter() - start) * 1000 / 3
+    y_proba = model.predict_proba(X_test)
+    threshold = 0.5
+    cm = confusion_matrix(y_test, (y_proba >= threshold).astype(int)).tolist()
     metrics_report = {
         'final_model': final_metrics,
         'baselines': baselines,
         'ring_detection': ring_eval,
+        'ring_candidate_sources': ring_eval.get('candidate_sources', {}),
+        'synthetic_data_disclaimer': 'Metrics are based on generated data and are not real-world accuracy estimates.',
         'test_set_size': int(len(X_test)),
         'test_fraud_count': int(y_test.sum()),
+        'training_seed': 42,
+        'model_version': model.version,
+        'feature_columns': list(X_test.columns),
+        'single_account_scoring_latency_ms': float(scoring_latency_ms),
+        'decision_threshold': threshold,
+        'confusion_matrix_labels': ['clear', 'mule'],
+        'confusion_matrix': cm,
     }
 
     with open(reports_dir / 'metrics.json', 'w') as f:

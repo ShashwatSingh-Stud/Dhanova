@@ -6,6 +6,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
+
 try:
     from backend.app.data_gen import generate
 except ModuleNotFoundError:
@@ -34,6 +35,51 @@ def test_fraud_prevalence():
     fraud_rate = data['labels']['is_mule'].mean()
 
     assert 0.02 <= fraud_rate <= 0.05, f"Fraud rate {fraud_rate:.2%} outside 2-5% range"
+
+
+def test_all_tables_are_reproducible():
+    """Every generated table, not just its first row, is seed-stable."""
+    first = generate(seed=42)
+    second = generate(seed=42)
+    for name in first:
+        pd.testing.assert_frame_equal(first[name], second[name], check_dtype=True)
+
+
+def test_injected_rings_have_expected_internal_activity():
+    """Each injected ring has the topology promised by its archetype."""
+    data = generate(seed=42)
+    tx = data['transactions']
+    labels = data['labels']
+    for ring_id, group in labels[labels['is_mule']].groupby('ring_id'):
+        members = set(group['account_id'])
+        internal = tx[
+            tx['sender_account_id'].isin(members)
+            & tx['receiver_account_id'].isin(members)
+        ]
+        archetype = group['ring_archetype'].iloc[0]
+        # Fan-in uses two collectors, so its directed spanning structure has
+        # two fewer edges than members; all other seeded patterns have at least
+        # one internal edge per member.
+        minimum_internal = len(members) - 2 if archetype == 'fan_in_collector' else len(members) - 1
+        assert len(internal) >= minimum_internal
+        if archetype == 'fan_out_dispersal':
+            assert internal['sender_account_id'].value_counts().max() >= len(members) - 1
+        elif archetype == 'fan_in_collector':
+            assert internal['receiver_account_id'].value_counts().max() >= 2
+        elif archetype == 'circular_layering':
+            assert internal['sender_account_id'].nunique() == len(members)
+
+
+def test_transactions_have_valid_references_and_no_self_transfers():
+    data = generate(seed=42)
+    account_ids = set(data['accounts']['account_id'])
+    tx = data['transactions']
+    # Normal traffic is generated from distinct account IDs; exclude any
+    # accidental self-transfer rows before asserting reference coverage.
+    assert not (tx['sender_account_id'] == tx['receiver_account_id']).any()
+    assert set(tx['sender_account_id']).issubset(account_ids)
+    assert set(tx['receiver_account_id']).issubset(account_ids)
+    assert set(tx['device_id']).issubset(set(data['devices']['device_id']))
 
 
 def test_no_orphan_accounts():
