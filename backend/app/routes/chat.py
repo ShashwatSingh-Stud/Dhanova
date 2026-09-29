@@ -61,4 +61,6 @@ Explanation: {risk_context.get('explanation_text', 'No explanation available')}
         raise
     except Exception as e:
         logger.error(f"Chat failed for account {payload.account_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process chat request.")
+        # Database/network failures mean the service is unavailable, rather
+        # than an application-level request error.
+        raise HTTPException(status_code=503, detail="Chat service unavailable.")
