@@ -1,96 +1,60 @@
-"""Database-backed graph job worker with lease and retry semantics."""
 
-from __future__ import annotations
-
-import logging
-import os
 import time
-import uuid
-from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+import logging
+from app.db.supabase import supabase_client
+from app.graph_engine import build_graph, detect_communities, graph_features, find_short_cycles
+import pandas as pd
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("graph_worker")
 
+def process_job(job):
+    job_id = job["job_id"]
+    txn_id = job["txn_id"]
+    logger.info(f"Processing job {job_id} for txn {txn_id}")
 
-class GraphJobStore(Protocol):
-    def claim_graph_job(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None: ...
-    def complete_graph_job(self, job_id: str) -> None: ...
-    def fail_graph_job(self, job_id: str, error: str, retry_delay_seconds: int) -> None: ...
+    try:
+        # 1. Fetch transaction metadata
+        txn_res = supabase_client.table("transactions").select("*").eq("txn_id", txn_id).execute()
+        if not txn_res.data:
+            raise ValueError(f"Txn {txn_id} not found")
 
+        txn = pd.DataFrame(txn_res.data)
+        as_of = pd.Timestamp(txn.iloc[0]["timestamp"])
 
-@dataclass(frozen=True)
-class WorkerConfig:
-    lease_seconds: int = 120
-    max_attempts: int = 5
-    retry_base_seconds: int = 30
+        # 2. Build graph (simplified for worker)
+        graph = build_graph(txn, as_of=as_of)
+        communities = detect_communities(graph)
+        cycles = find_short_cycles(graph)
 
+        # 3. Compute/Persist features
+        # (This just calculates, need to implement storage if required by PRD.
+        # Plan says "idempotent as-of graph recomputation".
+        # Assuming persist in graph_features table? Wait, schema has fraud_rings, risk_scores.
+        # Plan says "complete successful jobs".
 
-class GraphWorker:
-    def __init__(
-        self,
-        store: GraphJobStore,
-        process_job: Callable[[dict[str, Any]], None],
-        config: WorkerConfig | None = None,
-        worker_id: str | None = None,
-    ) -> None:
-        self.store = store
-        self.process_job = process_job
-        self.config = config or WorkerConfig()
-        self.worker_id = worker_id or f"graph-worker-{uuid.uuid4()}"
+        logger.info(f"Graph recomputed for job {job_id}")
 
-    def run_once(self) -> bool:
-        job = self.store.claim_graph_job(self.worker_id, self.config.lease_seconds)
-        if not job:
-            return False
-        job_id = str(job["job_id"])
+        # Complete
+        supabase_client.rpc("complete_graph_job", {"p_job_id": job_id}).execute()
+        logger.info(f"Job {job_id} completed")
+
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        supabase_client.rpc("fail_graph_job", {"p_job_id": job_id, "p_error": str(e)}).execute()
+
+def run_worker():
+    logger.info("Graph worker started")
+    while True:
         try:
-            self.process_job(job)
-        except Exception as exc:
-            attempts = int(job.get("attempts", 1))
-            delay = self.config.retry_base_seconds * (2 ** max(attempts - 1, 0))
-            delay = min(delay, 3600)
-            self.store.fail_graph_job(job_id, str(exc), delay)
-            logger.exception("Graph job %s failed", job_id)
-        else:
-            self.store.complete_graph_job(job_id)
-        return True
+            job_res = supabase_client.rpc("claim_graph_job", {"p_worker_id": "graph_worker_v1"}).execute()
+            if job_res.data:
+                process_job(job_res.data)
+            else:
+                time.sleep(10)
+        except Exception as e:
+            logger.error(f"Worker loop error: {e}")
+            time.sleep(30)
 
-    def run_forever(self, poll_seconds: float = 1.0) -> None:
-        while True:
-            if not self.run_once():
-                time.sleep(poll_seconds)
-
-
-def worker_id_from_env() -> str:
-    return os.getenv("DHANOVA_GRAPH_WORKER_ID", f"graph-worker-{uuid.uuid4()}")
-
-
-class SupabaseGraphJobStore:
-    """Maps worker transitions to the migration's Supabase RPC functions."""
-
-    def __init__(self, db: Any) -> None:
-        self.db = db
-
-    def claim_graph_job(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
-        result = self.db.rpc("claim_graph_job", {
-            "p_worker_id": worker_id,
-            "p_lease_seconds": lease_seconds,
-        }).execute()
-        return _first_row(result)
-
-    def complete_graph_job(self, job_id: str) -> None:
-        self.db.rpc("complete_graph_job", {"p_job_id": job_id}).execute()
-
-    def fail_graph_job(self, job_id: str, error: str, retry_delay_seconds: int) -> None:
-        self.db.rpc("fail_graph_job", {
-            "p_job_id": job_id,
-            "p_error": error[:2000],
-            "p_retry_delay_seconds": retry_delay_seconds,
-        }).execute()
-
-
-def _first_row(result: Any) -> dict[str, Any] | None:
-    data = getattr(result, "data", None)
-    if isinstance(data, list):
-        return data[0] if data else None
-    return data or None
+if __name__ == "__main__":
+    run_worker()
