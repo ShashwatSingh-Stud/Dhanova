@@ -1,56 +1,77 @@
 
 import time
 import logging
-from app.db.supabase import supabase_client
-from app.graph_engine import build_graph, detect_communities, graph_features, find_short_cycles
 import pandas as pd
+from dataclasses import dataclass
+from typing import Callable, Any, Optional
+
+from app.db.supabase import supabase_client
+from app.graph_engine import build_graph, detect_communities, find_short_cycles
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("graph_worker")
 
-def process_job(job):
-    job_id = job["job_id"]
-    txn_id = job["txn_id"]
-    logger.info(f"Processing job {job_id} for txn {txn_id}")
+@dataclass
+class WorkerConfig:
+    retry_base_seconds: int = 30
 
-    try:
+class GraphWorker:
+    def __init__(
+        self,
+        store: Any = supabase_client,
+        processor: Optional[Callable] = None,
+        config: WorkerConfig = WorkerConfig(),
+    ):
+        self.store = store
+        self.processor = processor or self._default_processor
+        self.config = config
+
+    def _default_processor(self, job: dict):
+        job_id = job["job_id"]
+        txn_id = job["txn_id"]
+
         # 1. Fetch transaction metadata
-        txn_res = supabase_client.table("transactions").select("*").eq("txn_id", txn_id).execute()
+        txn_res = self.store.table("transactions").select("*").eq("txn_id", txn_id).execute()
         if not txn_res.data:
             raise ValueError(f"Txn {txn_id} not found")
 
         txn = pd.DataFrame(txn_res.data)
         as_of = pd.Timestamp(txn.iloc[0]["timestamp"])
 
-        # 2. Build graph (simplified for worker)
+        # 2. Build graph
         graph = build_graph(txn, as_of=as_of)
-        communities = detect_communities(graph)
-        cycles = find_short_cycles(graph)
+        detect_communities(graph)
+        find_short_cycles(graph)
 
-        # 3. Compute/Persist features
-        # (This just calculates, need to implement storage if required by PRD.
-        # Plan says "idempotent as-of graph recomputation".
-        # Assuming persist in graph_features table? Wait, schema has fraud_rings, risk_scores.
-        # Plan says "complete successful jobs".
+    def run_once(self) -> bool:
+        # Assuming store has claim_graph_job RPC
+        job_res = self.store.rpc("claim_graph_job", {"p_worker_id": "graph_worker_v1"}).execute()
 
-        logger.info(f"Graph recomputed for job {job_id}")
+        if not job_res.data:
+            return False
 
-        # Complete
-        supabase_client.rpc("complete_graph_job", {"p_job_id": job_id}).execute()
-        logger.info(f"Job {job_id} completed")
+        job = job_res.data
+        try:
+            self.processor(job)
+            self.store.rpc("complete_graph_job", {"p_job_id": job["job_id"]}).execute()
+        except Exception as e:
+            logger.error(f"Job {job['job_id']} failed: {e}")
+            # Simplified exponential backoff logic (doubling base)
+            delay = self.config.retry_base_seconds * (2 ** (job.get("attempts", 0) - 1))
+            self.store.rpc("fail_graph_job", {
+                "p_job_id": job["job_id"],
+                "p_error": str(e),
+                "p_retry_delay_seconds": delay
+            }).execute()
 
-    except Exception as e:
-        logger.error(f"Job {job_id} failed: {e}")
-        supabase_client.rpc("fail_graph_job", {"p_job_id": job_id, "p_error": str(e)}).execute()
+        return True
 
 def run_worker():
+    worker = GraphWorker()
     logger.info("Graph worker started")
     while True:
         try:
-            job_res = supabase_client.rpc("claim_graph_job", {"p_worker_id": "graph_worker_v1"}).execute()
-            if job_res.data:
-                process_job(job_res.data)
-            else:
+            if not worker.run_once():
                 time.sleep(10)
         except Exception as e:
             logger.error(f"Worker loop error: {e}")

@@ -11,7 +11,17 @@ class Store:
 
     def claim_graph_job(self, worker_id, lease_seconds):
         job, self.job = self.job, None
-        return job
+        # Wrap in expected response structure
+        return type('Response', (), {'data': job})()
+
+    def rpc(self, name, params):
+        if name == "claim_graph_job":
+            return type('Response', (), {'execute': lambda *args, **kwargs: self.claim_graph_job(params['p_worker_id'], 120)})()
+        elif name == "complete_graph_job":
+            return type('Response', (), {'execute': lambda *args, **kwargs: self.complete_graph_job(params['p_job_id'])})()
+        elif name == "fail_graph_job":
+            return type('Response', (), {'execute': lambda *args, **kwargs: self.fail_graph_job(params['p_job_id'], params['p_error'], params['p_retry_delay_seconds'])})()
+        raise ValueError(f"Unknown RPC {name}")
 
     def complete_graph_job(self, job_id):
         self.completed.append(job_id)
