@@ -454,8 +454,14 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                 for j in range(num_burst):
                     txn_time = burst_start + timedelta(minutes=int(j * rng.integers(2, 8)))
 
-                    sender = member if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}'
-                    receiver = f'ACC_{rng.integers(1, len(accounts_df)):05d}' if sender == member else member
+                    # Keep most burst transfers inside the injected ring while
+                    # retaining a small amount of external victim noise.
+                    if rng.random() < 0.8:
+                        sender = member
+                        receiver = rng.choice([m for m in members if m != member])
+                    else:
+                        sender = f'ACC_{rng.integers(1, len(accounts_df)):05d}'
+                        receiver = member
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
                         'sender_account_id': sender,
@@ -477,8 +483,12 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
                     hour = rng.integers(0, 24)
                     txn_date = start_time + timedelta(days=int(rng.integers(int(fraud_day) - 1, int(fraud_day) + 2)), hours=int(hour), minutes=int(rng.integers(0, 60)))
 
-                    sender = member if rng.random() < 0.5 else f'ACC_{rng.integers(1, len(accounts_df)):05d}'
-                    receiver = f'ACC_{rng.integers(1, len(accounts_df)):05d}' if txn_id % 2 == 0 else member
+                    if rng.random() < 0.75:
+                        sender = member
+                        receiver = rng.choice([m for m in members if m != member])
+                    else:
+                        sender = f'ACC_{rng.integers(1, len(accounts_df)):05d}'
+                        receiver = member
                     transactions_list.append({
                         'txn_id': f'TXN_{txn_id:08d}',
                         'sender_account_id': sender,
@@ -497,11 +507,31 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
             'amount', 'channel', 'device_id', 'timestamp'
         ])
     else:
+        transactions_df = transactions_df[
+            transactions_df['sender_account_id'] != transactions_df['receiver_account_id']
+        ].sort_values('timestamp').reset_index(drop=True)
+
+    # Limit to target count without randomly deleting injected ring activity.
+    # Uniform sampling of the full table can erase most small fraud rings
+    # because merchant traffic dominates the row count. Keep every injected
+    # ring transaction and sample only non-fraud traffic.
+    if len(transactions_df) > TOTAL_TRANSACTIONS:
+        fraud_ids = set(accounts_df.loc[accounts_df['persona'] == 'fraud', 'account_id'])
+        fraud_mask = (
+            transactions_df['sender_account_id'].isin(fraud_ids)
+            | transactions_df['receiver_account_id'].isin(fraud_ids)
+        )
+        protected = transactions_df[fraud_mask]
+        normal = transactions_df[~fraud_mask]
+        remaining = max(0, TOTAL_TRANSACTIONS - len(protected))
+        if remaining < len(normal):
+            normal = normal.sample(n=remaining, random_state=seed)
+        transactions_df = pd.concat([protected, normal], ignore_index=True)
         transactions_df = transactions_df.sort_values('timestamp').reset_index(drop=True)
 
-    # Limit to target count
-    if len(transactions_df) > TOTAL_TRANSACTIONS:
-        transactions_df = transactions_df.sample(n=TOTAL_TRANSACTIONS, random_state=seed).sort_values('timestamp').reset_index(drop=True)
+    transactions_df = transactions_df[
+        transactions_df['sender_account_id'] != transactions_df['receiver_account_id']
+    ].reset_index(drop=True)
 
     print(f"     Generated {len(transactions_df)} transactions")
 
@@ -530,7 +560,7 @@ def generate(seed: int = 42) -> Dict[str, pd.DataFrame]:
     # Clean accounts table (remove fraud-specific columns)
     accounts_final = accounts_df.drop(columns=['persona', 'ring_id', 'archetype'], errors='ignore')
 
-    print(f"✓ Dataset generated: {len(accounts_final)} accounts, {len(transactions_df)} transactions")
+    print(f"Dataset generated: {len(accounts_final)} accounts, {len(transactions_df)} transactions")
     print(f"  Fraud prevalence: {labels_df['is_mule'].sum() / len(labels_df) * 100:.2f}%")
 
     return {
@@ -557,4 +587,4 @@ if __name__ == '__main__':
         df.to_parquet(path, index=False)
         print(f"Saved: {path} ({len(df)} rows)")
 
-    print("\n✓ All datasets saved to data/ directory")
+    print("\nAll datasets saved to data/ directory")

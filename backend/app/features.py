@@ -45,15 +45,20 @@ def build_features(
         DataFrame indexed by account_id with FEATURE_COLUMNS
     """
 
-    # Filter transactions by as_of
+    # Normalize timestamps before applying the point-in-time cutoff. This keeps
+    # naive database exports and aware API timestamps comparable in UTC.
+    tx = transactions.copy()
+    tx['timestamp'] = pd.to_datetime(tx['timestamp'], utc=True)
     if as_of is not None:
-        tx = transactions[transactions['timestamp'] <= as_of].copy()
-    else:
-        tx = transactions.copy()
+        cutoff = pd.Timestamp(as_of)
+        cutoff = cutoff.tz_localize('UTC') if cutoff.tzinfo is None else cutoff.tz_convert('UTC')
+        tx = tx[tx['timestamp'] <= cutoff].copy()
 
+    # Get all account IDs before any early return so dormant accounts remain
+    # scoreable for an as-of cutoff with no observed activity.
+    all_accounts = accounts['account_id'].unique()
     if len(tx) == 0:
-        # Return empty features with correct schema
-        return pd.DataFrame(columns=['account_id'] + FEATURE_COLUMNS).set_index('account_id')
+        return pd.DataFrame(0.0, index=pd.Index(all_accounts, name='account_id'), columns=FEATURE_COLUMNS)
 
     # Get all account IDs
     all_accounts = accounts['account_id'].unique()
@@ -229,7 +234,7 @@ def build_features(
                     'community_size', 'community_internal_flow_ratio',
                     'community_density', 'in_short_cycle']:
             if col in graph_features.columns:
-                behavior_features[col] = graph_features[col]
+                behavior_features[col] = graph_features[col].reindex(behavior_features.index).fillna(0)
             else:
                 behavior_features[col] = 0
     else:

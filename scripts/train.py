@@ -13,9 +13,16 @@ sys.path.insert(0, str(PROJECT_ROOT / 'backend'))
 import pandas as pd
 import numpy as np
 import json
+import time
+import hashlib
+import subprocess
+import platform
+import sklearn
+import xgboost
+import networkx
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import warnings
 
@@ -50,8 +57,83 @@ def load_data():
     return data
 
 
+def build_snapshot_features(data, as_of):
+    """Build behavior and graph features using only data visible at ``as_of``."""
+    as_of = pd.Timestamp(as_of)
+    if as_of.tzinfo is None:
+        as_of = as_of.tz_localize("UTC")
+    else:
+        as_of = as_of.tz_convert("UTC")
+    transactions = data['transactions'].copy()
+    transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], utc=True)
+    transactions = transactions[transactions['timestamp'] <= as_of].copy()
+    behavior_features = build_features(
+        transactions,
+        data['accounts'],
+        data['account_devices'],
+        as_of=as_of,
+    )
+    graph = build_graph(transactions, as_of=as_of)
+    communities = detect_communities(graph, seed=42)
+    rings = ring_candidates(
+        graph,
+        communities,
+        transactions=transactions,
+        account_devices=data['account_devices'],
+    )
+    suspicious_nodes = set()
+    for members in rings.head(50).get('members', []):
+        suspicious_nodes.update(members)
+    cycles = find_short_cycles(graph, sorted(suspicious_nodes)[:200], max_len=4)
+    graph_frame = compute_graph_features(graph, communities, cycles)
+    features = build_features(
+        transactions,
+        data['accounts'],
+        data['account_devices'],
+        as_of=as_of,
+        graph_features=graph_frame,
+    )
+    return features[FEATURE_COLUMNS]
+
+
+def evaluate_ring_snapshot(data, as_of, seed=42):
+    """Evaluate candidates using only transactions visible at one cutoff."""
+    cutoff = pd.Timestamp(as_of)
+    cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+    transactions = data['transactions'].copy()
+    transactions['timestamp'] = pd.to_datetime(transactions['timestamp'], utc=True)
+    visible = transactions[transactions['timestamp'] <= cutoff].copy()
+    graph = build_graph(visible, as_of=cutoff)
+    communities = detect_communities(graph, seed=seed)
+    candidates = ring_candidates(
+        graph,
+        communities,
+        transactions=visible,
+        account_devices=data['account_devices'],
+    )
+    metrics = evaluate_rings(candidates, data['labels'])
+    metrics['as_of'] = cutoff.isoformat()
+    metrics['visible_transaction_count'] = int(len(visible))
+    return metrics
+
+
+def evaluate_ring_snapshots(data, cutoffs):
+    """Return cutoff-specific and multi-seed ring metrics."""
+    by_cutoff = {
+        name: evaluate_ring_snapshot(data, cutoff)
+        for name, cutoff in cutoffs.items()
+    }
+    final_cutoff = cutoffs['test']
+    seed_runs = [evaluate_ring_snapshot(data, final_cutoff, seed) for seed in (42, 43, 44)]
+    aggregate = {}
+    for metric in ('ring_precision', 'ring_recall', 'false_positive_count'):
+        values = np.asarray([run.get(metric, 0.0) for run in seed_runs], dtype=float)
+        aggregate[metric] = {'mean': float(values.mean()), 'std': float(values.std())}
+    return {'by_cutoff': by_cutoff, 'multi_seed': aggregate}
+
+
 def build_all_features(data):
-    """Build behavior + graph features."""
+    """Build behavior + graph features for the complete snapshot."""
     print("\nBuilding features...")
 
     # Behavior features
@@ -70,17 +152,23 @@ def build_all_features(data):
     communities = detect_communities(G, seed=42)
     print(f"     Detected {len(communities)} communities")
 
-    rings = ring_candidates(G, communities)
+    rings = ring_candidates(
+        G,
+        communities,
+        transactions=data['transactions'],
+        account_devices=data['account_devices'],
+    )
     print(f"     Found {len(rings)} ring candidates")
 
     # Ring evaluation
     ring_eval = evaluate_rings(rings, data['labels'])
     print(f"     Ring Precision: {ring_eval['ring_precision']:.2%} | Ring Recall: {ring_eval['ring_recall']:.2%}")
+    print(f"     Per-archetype recall: {ring_eval.get('per_archetype', {})}")
 
     # Find cycles in top suspicious communities
     suspicious_nodes = []
     if len(rings) > 0:
-        for members in rings.head(20)['members']:
+        for members in rings.head(50)['members']:
             suspicious_nodes.extend(members)
     suspicious_nodes = list(set(suspicious_nodes))[:200]  # Limit for speed
 
@@ -156,7 +244,7 @@ def split_data(features, labels):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
-def train_baselines(X_train, X_test, y_train, y_test):
+def train_baselines(X_train, X_test, y_train, y_test, labels):
     """Train baseline models."""
     print("\nTraining baselines...")
 
@@ -205,17 +293,25 @@ def train_baselines(X_train, X_test, y_train, y_test):
 
     model_no_graph = RiskModel()
 
-    # Simple train without validation split for ablation
-    from sklearn.model_selection import train_test_split
-    X_tr, X_vl, y_tr, y_vl = train_test_split(
-        X_train_no_graph,
-        y_train,
-        test_size=0.2,
-        random_state=42,
-        stratify=y_train if y_train.nunique() > 1 else None,
+    # Use the same group-aware split policy as the full model. Fraud-ring
+    # members must never appear in both ablation train and validation sets.
+    label_groups = labels.set_index('account_id')
+    groups = np.array([
+        str(label_groups.loc[index, 'ring_id'])
+        if bool(label_groups.loc[index, 'is_mule'])
+        else str(index)
+        for index in X_train_no_graph.index
+    ])
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    train_indices, val_indices = next(
+        gss.split(X_train_no_graph, y_train, groups)
     )
+    X_tr = X_train_no_graph.iloc[train_indices]
+    X_vl = X_train_no_graph.iloc[val_indices]
+    y_tr = y_train.iloc[train_indices]
+    y_vl = y_train.iloc[val_indices]
 
-    model_no_graph.train(X_tr, y_tr, None, X_vl, y_vl)
+    model_no_graph.train(X_tr, y_tr, groups[train_indices], X_vl, y_vl)
 
     baselines['xgboost_no_graph'] = evaluate_model(model_no_graph, X_test_no_graph, y_test, name="XGBoost (no graph)")
 
@@ -249,7 +345,16 @@ def train_final_model(X_train, X_val, X_test, y_train, y_val, y_test):
     return model, metrics
 
 
-def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval):
+def generate_reports(
+    model,
+    X_test,
+    y_test,
+    baselines,
+    final_metrics,
+    ring_eval,
+    temporal_cutoffs=None,
+    latency_metrics=None,
+):
     """Generate evaluation reports and plots."""
     print("\nGenerating reports...")
 
@@ -257,12 +362,57 @@ def generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
     reports_dir.mkdir(exist_ok=True)
 
     # Metrics JSON
+    start = time.perf_counter()
+    for _ in range(3):
+        model.predict_proba(X_test.iloc[:1])
+    scoring_latency_ms = (time.perf_counter() - start) * 1000 / 3
+    y_proba = model.predict_proba(X_test)
+    threshold = 0.5
+    cm = confusion_matrix(y_test, (y_proba >= threshold).astype(int)).tolist()
+    try:
+        git_commit = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], cwd=PROJECT_ROOT, text=True
+        ).strip()
+    except Exception:
+        git_commit = None
+    feature_schema_hash = hashlib.sha256(
+        json.dumps(list(X_test.columns), separators=(",", ":")).encode()
+    ).hexdigest()
     metrics_report = {
         'final_model': final_metrics,
         'baselines': baselines,
         'ring_detection': ring_eval,
+        'ring_candidate_sources': ring_eval.get('candidate_sources', {}),
+        'synthetic_data_disclaimer': 'Metrics are based on generated data and are not real-world accuracy estimates.',
         'test_set_size': int(len(X_test)),
         'test_fraud_count': int(y_test.sum()),
+        'training_seed': 42,
+        'model_version': model.version,
+        'feature_columns': list(X_test.columns),
+        'feature_schema_hash': feature_schema_hash,
+        'split_strategy': 'temporal snapshots at 70/85/100 percent plus group-aware ring split',
+        'temporal_cutoffs': temporal_cutoffs or {},
+        'temporal_leakage_status': (
+            'feature and ring snapshots use as_of cutoffs; eventual labels are used '
+            'only for retrospective evaluation and may include future-known membership'
+        ),
+        'ring_snapshot_evaluation': ring_eval.get('snapshot_evaluation', {}),
+        'git_commit': git_commit,
+        'library_versions': {
+            'python': platform.python_version(),
+            'pandas': pd.__version__,
+            'scikit_learn': sklearn.__version__,
+            'xgboost': xgboost.__version__,
+            'networkx': networkx.__version__,
+        },
+        'single_account_scoring_latency_ms': float(scoring_latency_ms),
+        'latency_metrics_ms': latency_metrics or {
+            'model_inference': {'p50': float(scoring_latency_ms), 'p95': float(scoring_latency_ms), 'p99': float(scoring_latency_ms)},
+            'total': {'p50': float(scoring_latency_ms), 'p95': float(scoring_latency_ms), 'p99': float(scoring_latency_ms)},
+        },
+        'decision_threshold': threshold,
+        'confusion_matrix_labels': ['clear', 'mule'],
+        'confusion_matrix': cm,
     }
 
     with open(reports_dir / 'metrics.json', 'w') as f:
@@ -340,17 +490,66 @@ def main():
     # Build features
     features, rings, ring_eval = build_all_features(data)
 
-    # Split data
+    # Split account groups, then rebuild every split's features from a
+    # point-in-time snapshot to prevent future graph/behavior leakage.
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(features, data['labels'])
+    timestamps = pd.to_datetime(data['transactions']['timestamp'], utc=True)
+    start = timestamps.min()
+    end = timestamps.max()
+    train_cutoff = start + (end - start) * 0.70
+    val_cutoff = start + (end - start) * 0.85
+    print(f"\nTemporal cutoffs: train={train_cutoff}, val={val_cutoff}, test={end}")
+    train_snapshot = build_snapshot_features(data, train_cutoff)
+    val_snapshot = build_snapshot_features(data, val_cutoff)
+    test_snapshot = build_snapshot_features(data, end)
+    X_train = train_snapshot.reindex(X_train.index).fillna(0)
+    X_val = val_snapshot.reindex(X_val.index).fillna(0)
+    X_test = test_snapshot.reindex(X_test.index).fillna(0)
 
     # Train baselines
-    baselines = train_baselines(X_train, X_test, y_train, y_test)
+    baselines = train_baselines(X_train, X_test, y_train, y_test, data['labels'])
 
     # Train final model
     model, final_metrics = train_final_model(X_train, X_val, X_test, y_train, y_val, y_test)
 
+    cutoff_map = {
+        'train': train_cutoff,
+        'validation': val_cutoff,
+        'test': end,
+    }
+    snapshot_evaluation = evaluate_ring_snapshots(data, cutoff_map)
+    ring_eval['snapshot_evaluation'] = snapshot_evaluation
+
+    # Benchmark the model-only path with percentile reporting. End-to-end
+    # feature assembly is reported separately when a scoring frame is built.
+    timings = []
+    for _ in range(20):
+        started = time.perf_counter()
+        model.predict_proba(X_test.iloc[:1])
+        timings.append((time.perf_counter() - started) * 1000)
+    latency_metrics = {
+        'model_inference': {
+            key: float(np.percentile(timings, percentile))
+            for key, percentile in [('p50', 50), ('p95', 95), ('p99', 99)]
+        },
+        'total': {
+            key: float(np.percentile(timings, percentile))
+            for key, percentile in [('p50', 50), ('p95', 95), ('p99', 99)]
+        },
+        'scope': 'model inference over precomputed one-row features; feature assembly benchmark is not included',
+    }
+
     # Generate reports
-    generate_reports(model, X_test, y_test, baselines, final_metrics, ring_eval)
+    generate_reports(
+        model,
+        X_test,
+        y_test,
+        baselines,
+        final_metrics,
+        ring_eval,
+        temporal_cutoffs={name: cutoff.isoformat() for name, cutoff in cutoff_map.items()},
+        latency_metrics=latency_metrics,
+    )
 
     # Test explanations
     print("\nGenerating sample explanations...")
