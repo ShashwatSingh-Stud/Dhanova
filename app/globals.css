@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+/* Design Tokens - Tailwind v4 @theme */
+@theme {
+  /* Colors */
+  --color-bg: #8E9CB8;
+  --color-surface: #F3F6FB;
+  --color-navy-dark: #1B2447;
+  --color-navy-mid: #2A3560;
+  --color-teal: #19C3CF;
+  --color-teal-bright: #2DD4D4;
+  --color-periwinkle: #5B6CF0;
+  --color-risk-high: #EF4444;
+  --color-risk-mid: #F59E0B;
+  --color-risk-low: #19C3CF;
+  --color-text-primary: #1B2447;
+  --color-text-muted: #5F6B85;
+
+  /* Semantic color utilities */
+  --color-bg-page: var(--color-bg);
+  --color-bg-card: var(--color-surface);
+  --color-bg-dark: var(--color-navy-dark);
+  --color-text-body: var(--color-text-primary);
+  --color-text-subtle: var(--color-text-muted);
+  --color-accent: var(--color-teal);
+  --color-accent-bright: var(--color-teal-bright);
+
+  /* Spacing & Layout */
+  --radius-card: 24px;
+  --radius-bar: 20px;
+
+  /* Shadows */
+  --shadow-card: 0 8px 32px rgba(27, 36, 71, 0.10);
+  --shadow-card-dark: 0 12px 48px rgba(0, 0, 0, 0.3);
+  --shadow-glow-teal: 0 0 8px var(--color-teal-bright);
+}
+
+/* Dark theme overrides */
+:root[data-theme="dark"] {
+  --color-bg: #0F1419;
+  --color-surface: #1B2447;
+  --color-navy-dark: #0A0E1A;
+  --color-text-primary: #E5E7EB;
+  --color-text-muted: #9CA3AF;
+  --shadow-card: var(--shadow-card-dark);
+}
+
+/* Global styles */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  background-color: var(--color-bg-page);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  color: var(--color-text-body);
+  min-height: 100vh;
+}
+
+/* Utility classes using semantic tokens */
+.bg-page { background-color: var(--color-bg-page); }
+.bg-surface { background-color: var(--color-bg-card); }
+.bg-dark { background-color: var(--color-bg-dark); }
+.text-body { color: var(--color-text-body); }
+.text-muted { color: var(--color-text-subtle); }
+.text-accent { color: var(--color-accent); }
+
+.shadow-card { box-shadow: var(--shadow-card); }
+.shadow-glow-teal { box-shadow: var(--shadow-glow-teal); }
+
+.rounded-card { border-radius: var(--radius-card); }
+.rounded-bar { border-radius: var(--radius-bar); }
